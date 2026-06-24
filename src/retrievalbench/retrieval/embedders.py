@@ -7,7 +7,7 @@ class Embedder(Protocol):
     name: str
     dim: int
 
-    def embed(self, texts: list[str]) -> list[list[float]]: ...
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class OpenAITextEmbedderSmall:

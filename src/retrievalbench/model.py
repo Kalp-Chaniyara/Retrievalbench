@@ -16,3 +16,10 @@ class Chunk(BaseModel):
     index: int  # order within the document
     token_count: int
     metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class RetrievedChunk(BaseModel):
+    score: float
+    chunk_id: str
+    document_id: str
+    metadata: dict[str, str] = Field(default_factory=dict)

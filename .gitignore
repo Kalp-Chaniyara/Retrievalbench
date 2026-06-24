@@ -10,3 +10,5 @@ wheels/
 .venv
 
 /corpora
+
+/qdrant_storage
