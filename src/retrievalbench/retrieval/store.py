@@ -3,7 +3,7 @@ from typing import Protocol
 
 from qdrant_client import AsyncQdrantClient, models
 
-from retrievalbench.model import Chunk, RetrievedChunk
+from retrievalbench.model import Chunk
 
 NAMESPACE = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
@@ -22,6 +22,8 @@ class QdrantStore:
     """
     Qdrant Vector DB
     """
+
+    name = "Qdrant Store"
 
     def __init__(self, collection: str, dim: int):
         self.client = AsyncQdrantClient(url="http://localhost:6333")
@@ -58,23 +60,3 @@ class QdrantStore:
         ]
 
         await self.client.upsert(collection_name=self.collection, points=points)
-
-    async def dense_search(
-        self, query_vectors: list[float], limit: int
-    ) -> list[RetrievedChunk]:
-        response = await self.client.query_points(
-            collection_name=self.collection,
-            query=query_vectors,
-            limit=limit,
-            with_payload=True,
-        )
-
-        return [
-            RetrievedChunk(
-                score=retrieved_chunk.score,
-                chunk_id=retrieved_chunk.payload["chunk_id"],
-                document_id=retrieved_chunk.payload["document_id"],
-                metadata=retrieved_chunk.payload["metadata"],
-            )
-            for retrieved_chunk in response.points
-        ]
