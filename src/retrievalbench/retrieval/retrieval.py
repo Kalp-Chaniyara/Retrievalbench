@@ -41,6 +41,7 @@ class QdrantRetrieval:
                 chunk_id=retrieved_chunk.payload["chunk_id"],
                 document_id=retrieved_chunk.payload["document_id"],
                 metadata=retrieved_chunk.payload["metadata"],
+                text=retrieved_chunk.payload["text"],
             )
             for retrieved_chunk in response.points
         ]

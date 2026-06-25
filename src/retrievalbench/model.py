@@ -21,5 +21,6 @@ class Chunk(BaseModel):
 class RetrievedChunk(BaseModel):
     score: float
     chunk_id: str
+    text: str
     document_id: str
     metadata: dict[str, str] = Field(default_factory=dict)

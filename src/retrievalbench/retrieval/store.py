@@ -30,8 +30,8 @@ class QdrantStore:
         self.collection = collection
         self.dim = dim
 
-    async def exist_create_collection(self, collection: str) -> bool:
-        exist = self.client.collection_exists(self.collection)
+    async def exist_create_collection(self) -> None:
+        exist = await self.client.collection_exists(self.collection)
         if not exist:
             await self.client.create_collection(
                 collection_name=self.collection,
@@ -41,7 +41,7 @@ class QdrantStore:
             )
 
     async def upsert(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
-        await self.exist_create_collection(self.collection)
+        await self.exist_create_collection()
 
         points = [
             models.PointStruct(

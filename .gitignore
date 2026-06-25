@@ -9,6 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-/corpora
+/data/corpora
 
 /qdrant_storage
