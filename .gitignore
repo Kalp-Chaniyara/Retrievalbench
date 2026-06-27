@@ -12,3 +12,7 @@ wheels/
 /data/corpora
 
 /qdrant_storage
+
+/src/scratch.py
+
+/data
