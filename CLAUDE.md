@@ -14,17 +14,19 @@ This is NOT trying to beat AutoRAG / RAGAS / MLflow. Don't frame it as novel. Fr
 - `RetrievalBench_Roadmap.md` — phase-by-phase build order with definitions of done.
 
 ## Current state (read before suggesting next steps)
-Phase 0 (the thin slice: documents → one RAGAS number). Build direction is **back-to-front along the main path**.
+Phase 1. Build direction is **back-to-front along the main path**.
 
-Done: `models.py`, loaders, chunkers, embeddings, Qdrant store, `DenseRetriever` (top-k).
+Done: nothing. have to start the phase1 fully.
 
 Next, in order:
-1. `generate.py` — `Generator`: (query, retrieved chunks) → grounded answer. **← current task**
-2. 10–15 **hand-written** `GoldenItem`s over the real corpus (do not auto-generate these in Phase 0).
-3. `eval/metrics.py` — run RAGAS over the answers.
-4. Minimal `cli.py` — `rbench run` wires the line end-to-end and prints the 4 metric means. = **Phase 0 DoD.**
+1. `chunkers.py`: add `RecursiveChunker`.
+2. `config.py`: load YAML → `RetrievalConfig`; make chunker/embedder/retriever swappable by config.
+3. `storage.py`: SQLite; persist `ExperimentRun` (+ results, evaluations).
+4. `runner.py`: loop the golden set for one config → `ExperimentRun` → save.
+5. **Index cache**: key the Qdrant collection on `(chunking, embedding)` so you don't re-embed across retrieval variants.
+6. `cli.py`: `rbench compare run_a run_b` reads from storage, prints metric deltas.
 
-**The generator talks to `AsyncOpenAI` directly** via `chat.completions.create`. (An earlier plan to route it through a separate LLM-wrapper library has been dropped — ignore any reference to that.)
+**We talk to `AsyncOpenAI` directly** via `chat.completions.create`. (An earlier plan to route it through a separate LLM-wrapper library has been dropped — ignore any reference to that.)
 
 ## Stack (decided — do not substitute)
 - Python 3.11+, async-native.
