@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "pypdf>=6.14.2",
     "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
     "qdrant-client>=1.18.0",
     "tiktoken>=0.13.0",
     "typer>=0.26.8",

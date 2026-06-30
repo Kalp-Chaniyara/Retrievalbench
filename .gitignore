@@ -16,3 +16,5 @@ wheels/
 /src/scratch.py
 
 /data
+
+.env

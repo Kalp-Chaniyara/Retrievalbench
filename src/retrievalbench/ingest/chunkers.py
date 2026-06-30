@@ -6,6 +6,7 @@ from langchain_text_splitters import (
     TokenTextSplitter,
 )
 
+from retrievalbench.config import ChunkingConfig
 from retrievalbench.model import Chunk, Document
 
 
@@ -91,3 +92,17 @@ class RecursiveChunker:
             )
 
         return chunks
+
+
+# Registry maps the YAML wire-name (cfg.type) -> class. Lives here, beside the
+# classes (option B), so config.py never imports implementations. Keys match the
+# Literal values in ChunkingConfig, so the lookup can't miss after validation.
+_CHUNKERS: dict[str, type[Chunker]] = {
+    "fixed": FixedSizeChunker,
+    "recursive": RecursiveChunker,
+}
+
+
+def build_chunker(cfg: ChunkingConfig) -> Chunker:
+    cls = _CHUNKERS[cfg.type]
+    return cls(size=cfg.size, overlap=cfg.overlap)

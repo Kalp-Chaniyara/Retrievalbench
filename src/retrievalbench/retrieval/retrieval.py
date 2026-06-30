@@ -2,6 +2,7 @@ from typing import Protocol
 
 from qdrant_client import AsyncQdrantClient
 
+from retrievalbench.config import RetrieverConfig
 from retrievalbench.model import RetrievedChunk
 
 
@@ -45,3 +46,16 @@ class QdrantRetrieval:
             )
             for retrieved_chunk in response.points
         ]
+
+
+# `collection` and `dim` are NOT user config: collection is the per-(chunking,
+# embedding) cache key the runner computes (Step 5), dim comes from the chosen
+# embedder. So the builder takes them as runtime args alongside the config.
+_RETRIEVERS: dict[str, type[Retrieval]] = {
+    "dense": QdrantRetrieval,
+}
+
+
+def build_retriever(cfg: RetrieverConfig, collection: str, dim: int) -> Retrieval:
+    cls = _RETRIEVERS[cfg.type]
+    return cls(collection=collection, dim=dim)

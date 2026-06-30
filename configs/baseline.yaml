@@ -1,0 +1,20 @@
+name: baseline_dense
+
+chunking:
+  type: recursive
+  size: 800
+  overlap: 150
+
+embedding:
+  type: openai_small
+
+retrieval:
+  type: dense
+
+generation:
+  type: openai
+  model: gpt-4o-mini
+
+top_k_retrieve: 50
+top_k_final: 5
+seed: 42

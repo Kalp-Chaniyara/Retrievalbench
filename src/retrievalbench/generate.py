@@ -2,6 +2,7 @@ from typing import Protocol
 
 from openai import AsyncOpenAI
 
+from retrievalbench.config import GenerationConfig
 from retrievalbench.model import RetrievedChunk
 
 
@@ -43,3 +44,15 @@ class OpenAIGenerator:
         )
 
         return response.choices[0].message.content or ""
+
+
+# temperature is deliberately not threaded through config (G4: stays at 0).
+# Only `model` varies per experiment.
+_GENERATORS: dict[str, type[Generator]] = {
+    "openai": OpenAIGenerator,
+}
+
+
+def build_generator(cfg: GenerationConfig) -> Generator:
+    cls = _GENERATORS[cfg.type]
+    return cls(model=cfg.model)
