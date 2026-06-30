@@ -2,21 +2,25 @@ from retrievalbench.model import GoldenItem
 
 GOLDEN_SET: list[GoldenItem] = [
     GoldenItem(
+        id="q1",
         query="Before what time if i placed an order then it will get roasted on the same day?",
         expected_chunk_ids=["3a81559eaa45a5b2_0000"],
         expected_answer="If your order placed before 10:00 AM Pacific Time on a weekday, then they will roasted the same day and ship the following business day",
     ),
     GoldenItem(
+        id="q2",
         query="what is the return policy for Aurora? ",
         expected_chunk_ids=["3a81559eaa45a5b2_0000"],
         expected_answer="Because coffee is a perishable food product, Aurora does not accept returns of opened bags. If a bag arrives damaged or you received the wrong item, contact support within 14 days of delivery for a free replacement or full refund. Aurora does not require the damaged item to be shipped back.",
     ),
     GoldenItem(
+        id="q3",
         query="Can i order from India ?",
         expected_chunk_ids=["3a81559eaa45a5b2_0000"],
         expected_answer="As Aurora currently does not ship outside the United States. So you cannot order from India.",
     ),
     GoldenItem(
+        id="q4",
         query="What are different type of the coffee that",
         expected_chunk_ids=["34026131b9ee066b_0000", "34026131b9ee066b_0001"],
         expected_answer="""There are coffees are sold in 12-ounce bags of whole beans unless otherwise noted.
