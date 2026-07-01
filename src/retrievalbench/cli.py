@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 
 import typer
 from dotenv import load_dotenv
@@ -148,6 +149,99 @@ def run(
         f"\n[dim]saved run[/dim] [bold cyan]{experiment.id}[/bold cyan] "
         f"[dim]→ {store.path}[/dim]"
     )
+
+
+# Which aggregate keys `compare` diffs, and how to read each: `higher_is_better`
+# flips the colour logic (a lower latency/cost is an *improvement*, not a loss);
+# `fmt` renders both the value and the delta in that metric's own units.
+_COMPARE_METRICS: list[tuple[str, bool, Callable[[float], str]]] = [
+    ("faithfulness", True, lambda v: f"{v:.3f}"),
+    ("answer_relevancy", True, lambda v: f"{v:.3f}"),
+    ("context_precision", True, lambda v: f"{v:.3f}"),
+    ("context_recall", True, lambda v: f"{v:.3f}"),
+    ("mean_latency_ms", False, lambda v: f"{v:.0f} ms"),
+    ("total_cost_usd", False, lambda v: f"${v:.4f}"),
+]
+
+
+def _config_desc(run: ExperimentRun) -> str:
+    """One-line "what differs" summary so A vs B isn't just two opaque ids."""
+    c = run.config
+    return (
+        f"{c.chunking.type}/{c.chunking.size}/{c.chunking.overlap} · "
+        f"{c.retrieval.type} · {c.embedding.type}"
+    )
+
+
+def _delta_cell(
+    a: float, b: float, higher_is_better: bool, fmt: Callable[[float], str]
+) -> str:
+    """Signed delta B−A, green when it's an improvement, red when a regression.
+    Improvement direction is per-metric: up is good for scores, down for
+    latency/cost."""
+    delta = b - a
+    if abs(delta) < 1e-9:
+        return "[dim]—[/dim]"
+    improved = (delta > 0) == higher_is_better
+    color = "green" if improved else "red"
+    sign = "+" if delta > 0 else "-"
+    return f"[{color}]{sign}{fmt(abs(delta))}[/{color}]"
+
+
+def _print_available_runs(store: RunStore) -> None:
+    """Shown on a not-found so the user can copy a real id instead of guessing."""
+    rows = store.list_runs()
+    if not rows:
+        console.print("[dim]no saved runs yet — run `rbench run` first.[/dim]")
+        return
+    table = Table(title="available runs")
+    table.add_column("id", style="cyan")
+    table.add_column("config")
+    table.add_column("created_at", style="dim")
+    for run_id, config_name, created_at in rows:
+        table.add_row(run_id, config_name, created_at)
+    console.print(table)
+
+
+def _render_compare(run_a: ExperimentRun, run_b: ExperimentRun) -> None:
+    table = Table(title="compare  (Δ = B − A)")
+    table.add_column("metric", style="cyan")
+    table.add_column(f"A · {run_a.config.name}", justify="right")
+    table.add_column(f"B · {run_b.config.name}", justify="right")
+    table.add_column("Δ", justify="right")
+    for key, higher_is_better, fmt in _COMPARE_METRICS:
+        a = run_a.aggregate[key]
+        b = run_b.aggregate[key]
+        table.add_row(key, fmt(a), fmt(b), _delta_cell(a, b, higher_is_better, fmt))
+
+    def header(label: str, run: ExperimentRun) -> str:
+        return (
+            f"[bold]{label}[/bold] [cyan]{run.id}[/cyan] "
+            f"[dim]({_config_desc(run)})[/dim]"
+        )
+
+    console.print()
+    console.print(header("A", run_a))
+    console.print(header("B", run_b))
+    console.print()
+    console.print(table)
+
+
+@app.command()
+def compare(
+    run_a: str = typer.Argument(..., help="Baseline run id (A)."),
+    run_b: str = typer.Argument(..., help="Candidate run id (B)."),
+) -> None:
+    """Diff two saved runs on every metric: Δ = B − A, coloured by improvement."""
+    store = RunStore()
+    a = store.get_run(run_a)
+    b = store.get_run(run_b)
+    if a is None or b is None:
+        missing = ", ".join(rid for rid, run in ((run_a, a), (run_b, b)) if run is None)
+        console.print(f"[red]run(s) not found:[/red] {missing}")
+        _print_available_runs(store)
+        raise typer.Exit(code=1)
+    _render_compare(a, b)
 
 
 if __name__ == "__main__":

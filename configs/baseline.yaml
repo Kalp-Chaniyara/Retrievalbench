@@ -1,9 +1,11 @@
-name: baseline_dense
+# Fixed-size chunking baseline (A). Compare against configs/recursive_800.yaml —
+# only the `chunking` block differs, so any metric delta is due to chunking alone.
+name: fixed_512
 
 chunking:
-  type: recursive
-  size: 100
-  overlap: 30
+  type: fixed
+  size: 512
+  overlap: 64
 
 embedding:
   type: openai_small
@@ -15,6 +17,6 @@ generation:
   type: openai
   model: gpt-4o-mini
 
-top_k_retrieve: 10
+top_k_retrieve: 20
 top_k_final: 5
 seed: 42
