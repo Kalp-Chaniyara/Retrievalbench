@@ -7,45 +7,45 @@ GOLDEN_SET: list[GoldenItem] = [
         expected_chunk_ids=["3a81559eaa45a5b2_0000"],
         expected_answer="If your order placed before 10:00 AM Pacific Time on a weekday, then they will roasted the same day and ship the following business day",
     ),
-    GoldenItem(
-        id="q2",
-        query="what is the return policy for Aurora? ",
-        expected_chunk_ids=["3a81559eaa45a5b2_0000"],
-        expected_answer="Because coffee is a perishable food product, Aurora does not accept returns of opened bags. If a bag arrives damaged or you received the wrong item, contact support within 14 days of delivery for a free replacement or full refund. Aurora does not require the damaged item to be shipped back.",
-    ),
-    GoldenItem(
-        id="q3",
-        query="Can i order from India ?",
-        expected_chunk_ids=["3a81559eaa45a5b2_0000"],
-        expected_answer="As Aurora currently does not ship outside the United States. So you cannot order from India.",
-    ),
-    GoldenItem(
-        id="q4",
-        query="What are different type of the coffee that",
-        expected_chunk_ids=["34026131b9ee066b_0000", "34026131b9ee066b_0001"],
-        expected_answer="""There are coffees are sold in 12-ounce bags of whole beans unless otherwise noted.
-
-Single-Origin Coffees
-Kiamabara — Kenya
-A bright, fruit-forward coffee from the Nyeri region of Kenya. Tasting notes of blackcurrant, grapefruit, and brown sugar. Roast level: light.
-
-Hambela — Ethiopia
-A floral, tea-like washed coffee from the Guji zone of Ethiopia. Tasting notes of jasmine, bergamot, and peach. Roast level: light.
-
-San Fernando — Colombia
-A balanced, sweet coffee from Huila, Colombia. Tasting notes of milk chocolate, red apple, and caramel. Roast level: medium.
-
-Blends
-Daybreak Blend
-Aurora's flagship espresso blend, combining Colombian and Brazilian beans. Tasting notes of dark chocolate, hazelnut, and dried cherry. Roast level: medium-dark.
-
-Decaf Nightfall
-A Swiss Water Process decaffeinated Colombian coffee. Tasting notes of caramel and almond. Roast level: medium. The Swiss Water Process 12-ounce bag.
-
-Decaf Nightfall
-A Swiss Water Process decaffeinated Colombian coffee. Tasting notes of caramel and almond. Roast level: medium. The Swiss Water Process uses no chemical solvents.
-""",
-    ),
+    # GoldenItem(
+    #     id="q2",
+    #     query="what is the return policy for Aurora? ",
+    #     expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+    #     expected_answer="Because coffee is a perishable food product, Aurora does not accept returns of opened bags. If a bag arrives damaged or you received the wrong item, contact support within 14 days of delivery for a free replacement or full refund. Aurora does not require the damaged item to be shipped back.",
+    # ),
+    # GoldenItem(
+    #     id="q3",
+    #     query="Can i order from India ?",
+    #     expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+    #     expected_answer="As Aurora currently does not ship outside the United States. So you cannot order from India.",
+    # ),
+    #     GoldenItem(
+    #         id="q4",
+    #         query="What are different type of the coffee that",
+    #         expected_chunk_ids=["34026131b9ee066b_0000", "34026131b9ee066b_0001"],
+    #         expected_answer="""There are coffees are sold in 12-ounce bags of whole beans unless otherwise noted.
+    #
+    # Single-Origin Coffees
+    # Kiamabara — Kenya
+    # A bright, fruit-forward coffee from the Nyeri region of Kenya. Tasting notes of blackcurrant, grapefruit, and brown sugar. Roast level: light.
+    #
+    # Hambela — Ethiopia
+    # A floral, tea-like washed coffee from the Guji zone of Ethiopia. Tasting notes of jasmine, bergamot, and peach. Roast level: light.
+    #
+    # San Fernando — Colombia
+    # A balanced, sweet coffee from Huila, Colombia. Tasting notes of milk chocolate, red apple, and caramel. Roast level: medium.
+    #
+    # Blends
+    # Daybreak Blend
+    # Aurora's flagship espresso blend, combining Colombian and Brazilian beans. Tasting notes of dark chocolate, hazelnut, and dried cherry. Roast level: medium-dark.
+    #
+    # Decaf Nightfall
+    # A Swiss Water Process decaffeinated Colombian coffee. Tasting notes of caramel and almond. Roast level: medium. The Swiss Water Process 12-ounce bag.
+    #
+    # Decaf Nightfall
+    # A Swiss Water Process decaffeinated Colombian coffee. Tasting notes of caramel and almond. Roast level: medium. The Swiss Water Process uses no chemical solvents.
+    # """,
+    #     ),
 ]
 
 

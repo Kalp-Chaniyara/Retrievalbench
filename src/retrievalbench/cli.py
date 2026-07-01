@@ -1,5 +1,4 @@
 import asyncio
-import statistics
 
 import typer
 from dotenv import load_dotenv
@@ -7,12 +6,16 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from retrievalbench.eval.metric import EvalScores, evaluate_query
-from retrievalbench.generate import OpenAIGenerator
+from retrievalbench.config import load_config
 from retrievalbench.golden import GOLDEN_SET
-from retrievalbench.model import GoldenItem, RetrievedChunk
-from retrievalbench.retrieval.embedders import OpenAITextEmbedderSmall
-from retrievalbench.retrieval.retrieval import QdrantRetrieval
+from retrievalbench.model import (
+    ExperimentRun,
+    GoldenItem,
+    QueryEvaluation,
+    QueryResult,
+)
+from retrievalbench.runner import run_experiment
+from retrievalbench.storage import RunStore
 
 load_dotenv()
 
@@ -25,20 +28,24 @@ def main() -> None:
     """RetrievalBench: a config-driven retrieval-eval harness."""
 
 
-COLLECTION = "sample_data1"
+CORPUS_ID = "sample_data1"  # folder under data/corpora/ + the index-cache key
 JUDGE_MODEL = "gpt-4o-mini"
-TOP_K = 5
+
+
+def _color_score(score: float) -> str:
+    color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
+    return f"[{color}]{score:.3f}[/{color}]"
 
 
 def _render_query(
     index: int,
     item: GoldenItem,
-    answer: str,
-    retrieved: list[RetrievedChunk],
-    scores: EvalScores,
+    result: QueryResult,
+    evaluation: QueryEvaluation,
 ) -> None:
     """Print one clean block: query, retrieved chunks, answer, metric scores."""
     expected = set(item.expected_chunk_ids)
+    scores = evaluation.scores
 
     # Which chunks came back, in rank order, marked hit/miss vs the golden set.
     chunks = Table(box=None, pad_edge=False, show_header=True, header_style="bold")
@@ -46,7 +53,7 @@ def _render_query(
     chunks.add_column("rank", justify="right", style="dim")
     chunks.add_column("score", justify="right")
     chunks.add_column("chunk_id")
-    for rank, chunk in enumerate(retrieved, start=1):
+    for rank, chunk in enumerate(result.retrieved, start=1):
         hit = chunk.chunk_id in expected
         chunks.add_row(
             "[green]✓[/green]" if hit else "[red]✗[/red]",
@@ -72,7 +79,8 @@ def _render_query(
     body.add_row("[bold]Retrieved (top-k)[/bold]")
     body.add_row(chunks)
     body.add_row("")
-    body.add_row(f"[bold]Answer[/bold]\n{answer}")
+    body.add_row(f"[bold]Answer[/bold] [dim]({result.latency_ms:.0f} ms)[/dim]")
+    body.add_row(result.answer)
     body.add_row("")
     body.add_row("[bold]Scores[/bold]")
     body.add_row(metrics)
@@ -87,69 +95,59 @@ def _render_query(
     )
 
 
-def _color_score(score: float) -> str:
-    color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
-    return f"[{color}]{score:.3f}[/{color}]"
-
-
-async def _run() -> None:
-    embedder = OpenAITextEmbedderSmall()
-    retriever = QdrantRetrieval(collection=COLLECTION, dim=embedder.dim)
-    generator = OpenAIGenerator()
-
-    # Batch-embed every golden query in one HTTP call (async hygiene).
-    query_vectors = await embedder.embed([item.query for item in GOLDEN_SET])
-
-    faithfulness: list[float] = []
-    answer_relevancy: list[float] = []
-    context_precision: list[float] = []
-    context_recall: list[float] = []
-
-    for i, (item, vector) in enumerate(
-        zip(GOLDEN_SET, query_vectors, strict=True), start=1
-    ):
-        retrieved = await retriever.dense_search(vector, limit=TOP_K)
-        answer = await generator.generate(item.query, retrieved)
-        scores = await evaluate_query(
-            JUDGE_MODEL, item.query, answer, item.expected_answer, retrieved
-        )
-
-        faithfulness.append(scores.faithfulness.score)
-        answer_relevancy.append(scores.answer_relevancy.score)
-        context_precision.append(scores.context_precision.score)
-        context_recall.append(scores.context_recall.score)
-
-        _render_query(i, item, answer, retrieved, scores)
-
-    _render_summary(faithfulness, answer_relevancy, context_precision, context_recall)
-
-
-def _render_summary(
-    faithfulness: list[float],
-    answer_relevancy: list[float],
-    context_precision: list[float],
-    context_recall: list[float],
-) -> None:
-    table = Table(title=f"Phase 0 — means over {len(faithfulness)} queries")
+def _render_summary(run: ExperimentRun) -> None:
+    agg = run.aggregate
+    table = Table(
+        title=f"{run.config.name} — means over {len(run.query_results)} queries"
+    )
     table.add_column("metric", style="cyan")
     table.add_column("mean", justify="right")
-    for name, values in (
-        ("faithfulness", faithfulness),
-        ("answer_relevancy", answer_relevancy),
-        ("context_precision", context_precision),
-        ("context_recall", context_recall),
+    for name in (
+        "faithfulness",
+        "answer_relevancy",
+        "context_precision",
+        "context_recall",
     ):
-        table.add_row(name, _color_score(statistics.fmean(values)))
+        table.add_row(name, _color_score(agg[name]))
+    table.add_row("mean_latency_ms", f"{agg['mean_latency_ms']:.0f}")
 
     console.print()
     console.print(table)
 
 
+def _render_run(run: ExperimentRun) -> None:
+    golden_by_id = {item.id: item for item in GOLDEN_SET}
+    eval_by_id = {ev.golden_item_id: ev for ev in run.evaluations}
+    for index, result in enumerate(run.query_results, start=1):
+        item = golden_by_id[result.golden_item_id]
+        _render_query(index, item, result, eval_by_id[result.golden_item_id])
+    _render_summary(run)
+
+
 @app.command()
-def run() -> None:
-    """Run the golden set end-to-end and print the four mean RAG metrics."""
-    asyncio.run(_run())
-    # _run()
+def run(
+    config: str = typer.Option(
+        "configs/baseline.yaml", "--config", "-c", help="Experiment YAML."
+    ),
+) -> None:
+    """Run one config over the golden set, score it, persist it, and print results."""
+    cfg = load_config(config)
+    store = RunStore()
+    experiment = asyncio.run(
+        run_experiment(
+            cfg,
+            GOLDEN_SET,
+            corpus_id=CORPUS_ID,
+            judge_model=JUDGE_MODEL,
+            store=store,
+            console=console,
+        )
+    )
+    _render_run(experiment)
+    console.print(
+        f"\n[dim]saved run[/dim] [bold cyan]{experiment.id}[/bold cyan] "
+        f"[dim]→ {store.path}[/dim]"
+    )
 
 
 if __name__ == "__main__":

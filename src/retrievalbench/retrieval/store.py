@@ -40,6 +40,16 @@ class QdrantStore:
                 ),
             )
 
+    async def is_populated(self) -> bool:
+        """True iff the collection exists AND holds ≥1 point. The index-cache
+        hit check: an existing-but-empty collection (e.g. a run that crashed
+        mid-upsert) counts as a miss so we re-index instead of querying nothing.
+        """
+        if not await self.client.collection_exists(self.collection):
+            return False
+        result = await self.client.count(collection_name=self.collection)
+        return result.count > 0
+
     async def upsert(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
         await self.exist_create_collection()
 
