@@ -3,6 +3,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 
+from qdrant_client import models
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -23,7 +24,7 @@ from retrievalbench.model import (
     QueryEvaluation,
     QueryResult,
 )
-from retrievalbench.retrieval.embedders import build_embedder
+from retrievalbench.retrieval.embedders import build_embedder, build_sparse_embedder
 from retrievalbench.retrieval.retrieval import build_retriever
 from retrievalbench.storage import RunStore
 
@@ -73,14 +74,31 @@ async def run_experiment(
     index cache, so retrieval-only variants reuse vectors instead of re-embedding.
     """
     embedder = build_embedder(config.embedding)
-    collection = await ensure_indexed(corpus_id, config, embedder, console=console)
+    # Sparse encoder only exists for hybrid runs; dense runs never load it.
+    sparse_embedder = (
+        build_sparse_embedder(config.sparse_embedding)
+        if config.retrieval.type == "hybrid"
+        else None
+    )
+    collection = await ensure_indexed(
+        corpus_id, config, embedder, sparse_embedder, console=console
+    )
     retriever = build_retriever(
         config.retrieval, collection=collection, dim=embedder.dim
     )
     generator = build_generator(config.generation)
 
+    queries = [item.query for item in golden_set]
     # Batch-embed every query in one HTTP call (async hygiene), not per-loop.
-    query_vectors = await embedder.embed([item.query for item in golden_set])
+    query_vectors = await embedder.embed(queries)
+    # Sparse query vectors run in lockstep; None-filled for dense so the loop's
+    # strict zip stays uniform. embed_query (not embed): BM25 query weighting.
+    if sparse_embedder is not None:
+        query_sparse: list[models.SparseVector | None] = list(
+            await sparse_embedder.embed_query(queries)
+        )
+    else:
+        query_sparse = [None] * len(golden_set)
 
     query_results: list[QueryResult] = []
     evaluations: list[QueryEvaluation] = []
@@ -108,11 +126,13 @@ async def run_experiment(
             else None
         )
 
-        for item, vector in zip(golden_set, query_vectors, strict=True):
+        for item, vector, sparse in zip(
+            golden_set, query_vectors, query_sparse, strict=True
+        ):
             # latency covers the RAG pipeline (retrieve + generate), not judging.
             started = time.perf_counter()
-            retrieved = await retriever.dense_search(
-                vector, limit=config.top_k_retrieve
+            retrieved = await retriever.retrieve(
+                vector, limit=config.top_k_retrieve, sparse_vector=sparse
             )
             # No reranker yet: narrow to the top_k_final the generator sees.
             context = retrieved[: config.top_k_final]

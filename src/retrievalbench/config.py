@@ -23,13 +23,25 @@ class EmbeddingConfig(BaseModel):
     type: Literal["openai_small"] = "openai_small"
 
 
-class RetrieverConfig(BaseModel):
-    # Named RetrieverConfig (not RetrievalConfig) to avoid clashing with the
-    # top-level experiment model below. Dense-only for now; `collection`/`dim`
-    # are runtime-derived (cache key + embedder.dim), NOT user config.
+class SparseEmbeddingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["dense"] = "dense"
+    # Only used by hybrid retrieval. BM25 is the one sparse encoder today; the
+    # swap point mirrors EmbeddingConfig.
+    type: Literal["bm25"] = "bm25"
+
+
+class RetrieverConfig(BaseModel):
+    # Named RetrieverConfig (not RetrievalConfig) to avoid clashing with the
+    # top-level experiment model below. `collection`/`dim` are runtime-derived
+    # (cache key + embedder.dim), NOT user config.
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["dense", "hybrid"] = "dense"
+    # RRF fusion constant (hybrid only). A real experiment knob, not a magic
+    # number: higher k spreads weight further down the ranked lists. ~60 is the
+    # conventional default.
+    rrf_k: int = Field(default=60, gt=0)
 
 
 class GenerationConfig(BaseModel):
@@ -52,6 +64,9 @@ class RetrievalConfig(BaseModel):
     embedding: EmbeddingConfig
     retrieval: RetrieverConfig
     generation: GenerationConfig
+    # Dense-only configs leave this None; hybrid runs fill it in (below) so a
+    # dense config's serialized form stays clean.
+    sparse_embedding: SparseEmbeddingConfig | None = None
     top_k_retrieve: int = Field(default=50, gt=0)
     top_k_final: int = Field(default=5, gt=0)
     seed: int = 42
@@ -63,6 +78,14 @@ class RetrievalConfig(BaseModel):
                 f"top_k_final ({self.top_k_final}) cannot exceed "
                 f"top_k_retrieve ({self.top_k_retrieve})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _hybrid_has_sparse(self) -> "RetrievalConfig":
+        # Hybrid needs a sparse encoder; default it so YAML can just say
+        # `retrieval: {type: hybrid}` without also declaring the encoder.
+        if self.retrieval.type == "hybrid" and self.sparse_embedding is None:
+            self.sparse_embedding = SparseEmbeddingConfig()
         return self
 
 
