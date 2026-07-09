@@ -16,15 +16,15 @@ This is NOT trying to beat AutoRAG / RAGAS / MLflow. Don't frame it as novel. Fr
 ## Current state (read before suggesting next steps)
 Phase 1. Build direction is **back-to-front along the main path**.
 
-Done: nothing. have to start the phase1 fully.
-
-Next, in order:
-1. `chunkers.py`: add `RecursiveChunker`.
+Done:
+1. `chunkers.py`: added `RecursiveChunker`.
 2. `config.py`: load YAML → `RetrievalConfig`; make chunker/embedder/retriever swappable by config.
 3. `storage.py`: SQLite; persist `ExperimentRun` (+ results, evaluations).
 4. `runner.py`: loop the golden set for one config → `ExperimentRun` → save.
 5. **Index cache**: key the Qdrant collection on `(chunking, embedding)` so you don't re-embed across retrieval variants.
-6. `cli.py`: `rbench compare run_a run_b` reads from storage, prints metric deltas.
+
+Next, in order:
+1. `cli.py`: `rbench compare run_a run_b` reads from storage, prints metric deltas.
 
 **We talk to `AsyncOpenAI` directly** via `chat.completions.create`. (An earlier plan to route it through a separate LLM-wrapper library has been dropped — ignore any reference to that.)
 
