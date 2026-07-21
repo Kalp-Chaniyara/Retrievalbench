@@ -8,7 +8,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from retrievalbench.config import load_config
-from retrievalbench.golden import GOLDEN_SET
+from retrievalbench.golden import GOLDEN_SET, hit_chunk_ids
 from retrievalbench.model import (
     ExperimentRun,
     GoldenItem,
@@ -45,7 +45,7 @@ def _render_query(
     evaluation: QueryEvaluation,
 ) -> None:
     """Print one clean block: query, retrieved chunks, answer, metric scores."""
-    expected = set(item.expected_chunk_ids)
+    hits = hit_chunk_ids(result.retrieved, item)  # resolved per config, not hardcoded
     scores = evaluation.scores
 
     # Which chunks came back, in rank order, marked hit/miss vs the golden set.
@@ -55,7 +55,7 @@ def _render_query(
     chunks.add_column("score", justify="right")
     chunks.add_column("chunk_id")
     for rank, chunk in enumerate(result.retrieved, start=1):
-        hit = chunk.chunk_id in expected
+        hit = chunk.chunk_id in hits
         chunks.add_row(
             "[green]✓[/green]" if hit else "[red]✗[/red]",
             str(rank),

@@ -34,7 +34,14 @@ class RetrievedChunk(BaseModel):
 class GoldenItem(BaseModel):
     id: str  # stable id so QueryResult/QueryEvaluation can link back here
     query: str
-    expected_chunk_ids: list[str]
+    # Retrieval ground truth as verbatim, answer-bearing SOURCE snippets — not
+    # chunk ids. A chunk_id encodes position (`docid_0007`), which shifts with
+    # chunk size, so it can't be ground truth for a benchmark that compares
+    # chunking configs. Source text is config-stable: a chunk is a retrieval
+    # "hit" if it contains any of these snippets, so the matching chunk id is
+    # resolved per config at eval time (see golden.chunk_matches_snippets).
+    # This drives the F1 (retrieval-miss) gate; F2/F3 are gated on it.
+    expected_snippets: list[str]
     expected_answer: str
 
 

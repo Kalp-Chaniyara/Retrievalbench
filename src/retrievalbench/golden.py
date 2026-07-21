@@ -1,4 +1,37 @@
-from retrievalbench.model import GoldenItem
+import re
+
+from retrievalbench.model import GoldenItem, RetrievedChunk
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _normalize(text: str) -> str:
+    """Collapse whitespace + lowercase. Source docs hard-wrap sentences, so a
+    verbatim snippet spans newlines once chunked; normalizing both sides lets a
+    clean single-line snippet still match the wrapped chunk text."""
+    return _WHITESPACE.sub(" ", text).strip().lower()
+
+
+def chunk_matches_snippets(chunk_text: str, expected_snippets: list[str]) -> bool:
+    """True if a chunk is a retrieval hit for a golden item: it verbatim-contains
+    (after whitespace/case normalization) ANY of the item's answer-bearing
+    snippets. Snippets are config-independent source text, so this resolves to
+    the right chunk(s) under whatever chunking produced them — no chunk id is
+    hardcoded. Shared by the CLI display and (later) the F1 diagnostic."""
+    haystack = _normalize(chunk_text)
+    return any(_normalize(snippet) in haystack for snippet in expected_snippets)
+
+
+def hit_chunk_ids(retrieved: list[RetrievedChunk], item: GoldenItem) -> set[str]:
+    """Which of the retrieved chunk ids actually satisfy the golden item — the
+    per-config resolution of 'the expected chunks' that a literal id list can't
+    express. Empty set == retrieval miss (the F1 condition)."""
+    return {
+        chunk.chunk_id
+        for chunk in retrieved
+        if chunk_matches_snippets(chunk.text, item.expected_snippets)
+    }
+
 
 GOLDEN_SET: list[GoldenItem] = [
     # GoldenItem(
@@ -8,17 +41,19 @@ GOLDEN_SET: list[GoldenItem] = [
     #     expected_answer="If your order placed before 10:00 AM Pacific Time on a weekday, then they will roasted the same day and ship the following business day",
     # ),
     # --- Tricky additions (stress retrieval + generation) ---
-    # NOTE: expected_chunk_ids are document-level (the answer-bearing file's first
-    # chunk, "_0000"), matching q1's convention. The exact chunk index a fact lands
-    # in shifts with chunk size, so these will need by-document / per-config
-    # attention once Phase 2's F1 diagnostics actually consume them.
+    # NOTE: ground truth is verbatim answer-bearing SOURCE snippets (see
+    # GoldenItem.expected_snippets), not chunk ids — so this one golden set is
+    # valid across every chunking config. The hit chunk id is resolved per config
+    # at eval time by golden.chunk_matches_snippets. Keep snippets short and
+    # distinctive (a phrase, not a whole sentence) so a chunk-boundary split is
+    # unlikely to break the match.
     GoldenItem(
         id="t1",  # temporal negation: after-cutoff is the complement of q1
         query=(
             "I placed my order at 3 PM Pacific on a Wednesday. "
             "Will it be roasted that same day?"
         ),
-        expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+        expected_snippets=["roasted on the next roast day"],
         expected_answer=(
             "No. Orders placed after the 10:00 AM Pacific cutoff are roasted on the "
             "next roast day, not the same day."
@@ -29,7 +64,10 @@ GOLDEN_SET: list[GoldenItem] = [
         query=(
             "If I buy two bags of Hambela, do I qualify for free standard shipping?"
         ),
-        expected_chunk_ids=["34026131b9ee066b_0000", "3a81559eaa45a5b2_0000"],
+        expected_snippets=[
+            "$21 per 12-ounce",
+            "Orders over $40 qualify for free standard shipping",
+        ],
         expected_answer=(
             "Yes. Hambela is $21 per bag, so two bags total $42, which is over the "
             "$40 threshold that qualifies an order for free standard shipping."
@@ -38,7 +76,7 @@ GOLDEN_SET: list[GoldenItem] = [
     GoldenItem(
         id="t3",  # negation / not-in-text geography: hallucination bait
         query="Can I have my coffee delivered to Toronto, Canada?",
-        expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+        expected_snippets=["Aurora currently does not ship outside the United States"],
         expected_answer=(
             "No. Aurora ships within the United States only and does not currently "
             "ship internationally."
@@ -47,7 +85,7 @@ GOLDEN_SET: list[GoldenItem] = [
     GoldenItem(
         id="t4",  # refusal of an unknown: invites a made-up mg number (F3 bait)
         query="How many milligrams of caffeine are in a cup of your dark roast?",
-        expected_chunk_ids=["8f05fd1d34154175_0000"],
+        expected_snippets=["Aurora does not list exact caffeine content per cup"],
         expected_answer=(
             "Aurora does not list exact caffeine content per cup because it varies "
             "by brew method and dose. As a general guide, a light and a dark roast "
@@ -57,7 +95,7 @@ GOLDEN_SET: list[GoldenItem] = [
     GoldenItem(
         id="t5",  # counterintuitive: common belief (freezer = fresh) contradicts doc
         query="To keep my beans fresh longer, should I store them in the freezer?",
-        expected_chunk_ids=["8f05fd1d34154175_0000"],
+        expected_snippets=["store coffee in the refrigerator or freezer for daily use"],
         expected_answer=(
             "No. Aurora advises against refrigerating or freezing coffee for daily "
             "use because condensation degrades the beans; store it in an airtight "
@@ -67,7 +105,7 @@ GOLDEN_SET: list[GoldenItem] = [
     GoldenItem(
         id="t6",  # superlative: compare three prices, exclude blends
         query="Which of Aurora's single-origin coffees is the most expensive?",
-        expected_chunk_ids=["34026131b9ee066b_0000"],
+        expected_snippets=["$21 per 12-ounce"],  # Hambela's price line (the max)
         expected_answer=(
             "Hambela from Ethiopia, at $21 per 12-ounce bag — more than Kiamabara "
             "($19) and San Fernando ($17)."
@@ -79,7 +117,7 @@ GOLDEN_SET: list[GoldenItem] = [
             "I opened a bag and didn't like the flavor. "
             "How do I return it for a refund?"
         ),
-        expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+        expected_snippets=["does not accept returns of opened bags"],
         expected_answer=(
             "You can't return it. Aurora does not accept returns of opened bags "
             "because coffee is perishable; refunds or replacements are only for bags "
@@ -89,7 +127,7 @@ GOLDEN_SET: list[GoldenItem] = [
     GoldenItem(
         id="t8",  # framing trap: "just Fair Trade" vs the above-floor detail
         query="Does Aurora just pay the standard Fair Trade price to its producers?",
-        expected_chunk_ids=["847e853c85a6236e_0000"],
+        expected_snippets=["well above the Fair Trade floor price"],
         expected_answer=(
             "No. Aurora pays a minimum of $3.50 per pound to producers, which is "
             "well above the Fair Trade floor price."
