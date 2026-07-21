@@ -44,6 +44,17 @@ class RetrieverConfig(BaseModel):
     rrf_k: int = Field(default=60, gt=0)
 
 
+class RerankerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Cross-encoder is the only reranker kind today; `type` is the swap point
+    # (a hosted Cohere/Jina reranker would add a Literal value + registry entry).
+    # `model` varies within that kind — the `rerankers` lib takes a model NAME,
+    # so swapping BGE for another cross-encoder is a config change, not code.
+    type: Literal["cross_encoder"] = "cross_encoder"
+    model: str = "BAAI/bge-reranker-v2-m3"
+
+
 class GenerationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -63,6 +74,10 @@ class RetrievalConfig(BaseModel):
     chunking: ChunkingConfig
     embedding: EmbeddingConfig
     retrieval: RetrieverConfig
+    # Optional in the pipeline: None -> retrieval order is the final order (the
+    # runner just slices top_k_final). Set -> retrieve top_k_retrieve, rerank,
+    # keep top_k_final (the retrieve-50 -> rerank -> top-5 pattern).
+    reranker: RerankerConfig | None = None
     generation: GenerationConfig
     # Dense-only configs leave this None; hybrid runs fill it in (below) so a
     # dense config's serialized form stays clean.

@@ -14,6 +14,7 @@ from retrievalbench.model import (
     GoldenItem,
     QueryEvaluation,
     QueryResult,
+    RetrievedChunk,
 )
 from retrievalbench.runner import run_experiment
 from retrievalbench.storage import RunStore
@@ -38,6 +39,26 @@ def _color_score(score: float) -> str:
     return f"[{color}]{score:.3f}[/{color}]"
 
 
+def _chunk_table(chunks: list[RetrievedChunk], hits: set[str]) -> Table:
+    """One rank-ordered chunk list, each row marked hit/miss vs the golden set.
+    `hits` is computed per list (snippet-based), so the same helper renders both
+    the pre-rerank shortlist and the reranked context with correct ✓/✗."""
+    table = Table(box=None, pad_edge=False, show_header=True, header_style="bold")
+    table.add_column("", width=3)
+    table.add_column("rank", justify="right", style="dim")
+    table.add_column("score", justify="right")
+    table.add_column("chunk_id")
+    for rank, chunk in enumerate(chunks, start=1):
+        hit = chunk.chunk_id in hits
+        table.add_row(
+            "[green]✓[/green]" if hit else "[red]✗[/red]",
+            str(rank),
+            f"{chunk.score:.3f}",
+            f"[green]{chunk.chunk_id}[/green]" if hit else chunk.chunk_id,
+        )
+    return table
+
+
 def _render_query(
     index: int,
     item: GoldenItem,
@@ -45,23 +66,18 @@ def _render_query(
     evaluation: QueryEvaluation,
 ) -> None:
     """Print one clean block: query, retrieved chunks, answer, metric scores."""
-    hits = hit_chunk_ids(result.retrieved, item)  # resolved per config, not hardcoded
     scores = evaluation.scores
 
-    # Which chunks came back, in rank order, marked hit/miss vs the golden set.
-    chunks = Table(box=None, pad_edge=False, show_header=True, header_style="bold")
-    chunks.add_column("", width=3)
-    chunks.add_column("rank", justify="right", style="dim")
-    chunks.add_column("score", justify="right")
-    chunks.add_column("chunk_id")
-    for rank, chunk in enumerate(result.retrieved, start=1):
-        hit = chunk.chunk_id in hits
-        chunks.add_row(
-            "[green]✓[/green]" if hit else "[red]✗[/red]",
-            str(rank),
-            f"{chunk.score:.3f}",
-            f"[green]{chunk.chunk_id}[/green]" if hit else chunk.chunk_id,
-        )
+    # The pre-rerank shortlist (F1 gate) and, when a reranker ran, the reranked
+    # top_k_final the generator actually answered from (F2/F3 gate). Hits are
+    # snippet-based and computed per list, so ✓/✗ is correct in each table.
+    retrieved_hits = hit_chunk_ids(result.retrieved, item)
+    retrieved_table = _chunk_table(result.retrieved, retrieved_hits)
+    reranked_table = (
+        _chunk_table(result.reranked, hit_chunk_ids(result.reranked, item))
+        if result.reranked is not None
+        else None
+    )
 
     # The four metrics with the judge's reason underneath each one.
     metrics = Table(box=None, pad_edge=False, show_header=True, header_style="bold")
@@ -77,8 +93,14 @@ def _render_query(
         metrics.add_row(name, _color_score(ms.score), f"[dim]{ms.reason}[/dim]")
 
     body = Table.grid(padding=(0, 0))
-    body.add_row("[bold]Retrieved (top-k)[/bold]")
-    body.add_row(chunks)
+    body.add_row("[bold]Retrieved (shortlist)[/bold]")
+    body.add_row(retrieved_table)
+    if reranked_table is not None:
+        body.add_row("")
+        body.add_row(
+            f"[bold]Reranked → context (top {len(result.reranked)})[/bold]"
+        )
+        body.add_row(reranked_table)
     body.add_row("")
     body.add_row(f"[bold]Answer[/bold] [dim]({result.latency_ms:.0f} ms)[/dim]")
     body.add_row(result.answer)

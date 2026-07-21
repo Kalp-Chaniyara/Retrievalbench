@@ -25,6 +25,7 @@ from retrievalbench.model import (
     QueryResult,
 )
 from retrievalbench.retrieval.embedders import build_embedder, build_sparse_embedder
+from retrievalbench.retrieval.rerankers import build_reranker
 from retrievalbench.retrieval.retrieval import build_retriever
 from retrievalbench.storage import RunStore
 
@@ -86,6 +87,10 @@ async def run_experiment(
     retriever = build_retriever(
         config.retrieval, collection=collection, dim=embedder.dim
     )
+    # Optional stage: None -> the runner just slices retrieval order to top_k_final.
+    reranker = (
+        build_reranker(config.reranker) if config.reranker is not None else None
+    )
     generator = build_generator(config.generation)
 
     queries = [item.query for item in golden_set]
@@ -134,8 +139,18 @@ async def run_experiment(
             retrieved = await retriever.retrieve(
                 vector, limit=config.top_k_retrieve, sparse_vector=sparse
             )
-            # No reranker yet: narrow to the top_k_final the generator sees.
-            context = retrieved[: config.top_k_final]
+            # Rerank the full shortlist -> top_k_final; without a reranker, the
+            # retrieval order IS the final order, so just slice. `reranked` is
+            # persisted only in the reranker case (None otherwise), but the
+            # generator always sees `context` — the top_k_final it will answer from.
+            if reranker is not None:
+                reranked = await reranker.rerank(
+                    item.query, retrieved, top_k=config.top_k_final
+                )
+                context = reranked
+            else:
+                reranked = None
+                context = retrieved[: config.top_k_final]
             answer = await generator.generate(item.query, context)
             latency_ms = (time.perf_counter() - started) * 1000
 
@@ -147,6 +162,7 @@ async def run_experiment(
                 QueryResult(
                     golden_item_id=item.id,
                     retrieved=retrieved,
+                    reranked=reranked,
                     answer=answer,
                     latency_ms=latency_ms,
                 )

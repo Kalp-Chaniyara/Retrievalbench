@@ -15,7 +15,13 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "qdrant-client>=1.18.0",
+    "rerankers[transformers]>=0.10.0",
     "tiktoken>=0.13.0",
+    # torch arrives transitively via rerankers[transformers]. uv's
+    # [tool.uv.sources] override only binds to *direct* dependencies, so torch
+    # must be declared here for the pytorch-cpu routing below to take effect —
+    # otherwise it resolves from PyPI as the multi-GB CUDA build.
+    "torch>=2.0",
     "typer>=0.26.8",
 ]
 
@@ -37,6 +43,18 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.18",
 ]
+
+# The cross-encoder reranker (rerankers[transformers] -> torch) runs on CPU here;
+# the default PyPI torch wheel bundles the multi-GB CUDA stack, so pin torch to
+# PyTorch's CPU-only index to keep the install small (bge-reranker-v2-m3 needs no
+# GPU). `explicit = true` -> only packages routed here via sources use this index.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 
 [tool.ruff]
 line-length = 88

@@ -75,7 +75,13 @@ class QueryResult(BaseModel):
     """What retrieval + generation produced for one golden query."""
 
     golden_item_id: str
+    # Full retrieval output (top_k_retrieve), pre-rerank — the F1 (retrieval-miss)
+    # gate reads this: a snippet missing here means it was never retrieved at all.
     retrieved: list[RetrievedChunk]
+    # The reranked top_k_final the generator actually saw, or None when no
+    # reranker is configured (then the generator saw retrieved[:top_k_final]).
+    # F2/F3 gate on the context the generator saw, so they read this when set.
+    reranked: list[RetrievedChunk] | None = None
     answer: str
     latency_ms: float = 0.0
     cost_usd: float = 0.0  # 0 until the generator returns token usage

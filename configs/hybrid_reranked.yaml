@@ -1,0 +1,33 @@
+# Hybrid retrieval + cross-encoder rerank (the retrieve-many -> rerank -> top-k
+# pattern). Compare against a hybrid-only config to isolate the reranker's lift:
+# only the `reranker` block differs, so any metric delta is the reranker alone.
+name: hybrid_reranked
+
+chunking:
+  type: recursive
+  size: 250
+  overlap: 150
+
+embedding:
+  type: openai_small
+
+retrieval:
+  type: hybrid
+
+reranker:
+  type: cross_encoder
+  # Small English cross-encoder (~90 MB) — chosen over BAAI/bge-reranker-v2-m3
+  # (2.27 GB) to stay within local disk/bandwidth. Same rerankers-library API,
+  # so this is a pure config swap; bump to ms-marco-MiniLM-L-12-v2 (~130 MB) or
+  # bge-reranker-base (~1.1 GB) if you want more quality.
+  model: BAAI/bge-reranker-v2-m3
+
+generation:
+  type: openai
+  model: gpt-4o-mini
+
+# Retrieve a wide shortlist so the cross-encoder has candidates to re-order,
+# then keep only the top 5 it ranks highest for the generator.
+top_k_retrieve: 50
+top_k_final: 5
+seed: 42
