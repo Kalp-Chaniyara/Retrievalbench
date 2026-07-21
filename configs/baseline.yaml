@@ -4,7 +4,7 @@ name: fixed_512
 
 chunking:
   type: fixed
-  size: 512
+  size: 200
   overlap: 64
 
 embedding:
