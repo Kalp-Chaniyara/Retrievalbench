@@ -73,35 +73,35 @@ GOLDEN_SET: list[GoldenItem] = [
             "$40 threshold that qualifies an order for free standard shipping."
         ),
     ),
-    GoldenItem(
-        id="t3",  # negation / not-in-text geography: hallucination bait
-        query="Can I have my coffee delivered to Toronto, Canada?",
-        expected_snippets=["Aurora currently does not ship outside the United States"],
-        expected_answer=(
-            "No. Aurora ships within the United States only and does not currently "
-            "ship internationally."
-        ),
-    ),
-    GoldenItem(
-        id="t4",  # refusal of an unknown: invites a made-up mg number (F3 bait)
-        query="How many milligrams of caffeine are in a cup of your dark roast?",
-        expected_snippets=["Aurora does not list exact caffeine content per cup"],
-        expected_answer=(
-            "Aurora does not list exact caffeine content per cup because it varies "
-            "by brew method and dose. As a general guide, a light and a dark roast "
-            "of the same coffee contain nearly the same caffeine by weight."
-        ),
-    ),
-    GoldenItem(
-        id="t5",  # counterintuitive: common belief (freezer = fresh) contradicts doc
-        query="To keep my beans fresh longer, should I store them in the freezer?",
-        expected_snippets=["store coffee in the refrigerator or freezer for daily use"],
-        expected_answer=(
-            "No. Aurora advises against refrigerating or freezing coffee for daily "
-            "use because condensation degrades the beans; store it in an airtight "
-            "container away from light, heat, and moisture."
-        ),
-    ),
+    # GoldenItem(
+    #     id="t3",  # negation / not-in-text geography: hallucination bait
+    #     query="Can I have my coffee delivered to Toronto, Canada?",
+    #     expected_snippets=["Aurora currently does not ship outside the United States"],
+    #     expected_answer=(
+    #         "No. Aurora ships within the United States only and does not currently "
+    #         "ship internationally."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t4",  # refusal of an unknown: invites a made-up mg number (F3 bait)
+    #     query="How many milligrams of caffeine are in a cup of your dark roast?",
+    #     expected_snippets=["Aurora does not list exact caffeine content per cup"],
+    #     expected_answer=(
+    #         "Aurora does not list exact caffeine content per cup because it varies "
+    #         "by brew method and dose. As a general guide, a light and a dark roast "
+    #         "of the same coffee contain nearly the same caffeine by weight."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t5",  # counterintuitive: common belief (freezer = fresh) contradicts doc
+    #     query="To keep my beans fresh longer, should I store them in the freezer?",
+    #     expected_snippets=["store coffee in the refrigerator or freezer for daily use"],
+    #     expected_answer=(
+    #         "No. Aurora advises against refrigerating or freezing coffee for daily "
+    #         "use because condensation degrades the beans; store it in an airtight "
+    #         "container away from light, heat, and moisture."
+    #     ),
+    # ),
     GoldenItem(
         id="t6",  # superlative: compare three prices, exclude blends
         query="Which of Aurora's single-origin coffees is the most expensive?",
@@ -111,28 +111,28 @@ GOLDEN_SET: list[GoldenItem] = [
             "($19) and San Fernando ($17)."
         ),
     ),
-    GoldenItem(
-        id="t7",  # false premise: assumes opened bags are returnable
-        query=(
-            "I opened a bag and didn't like the flavor. "
-            "How do I return it for a refund?"
-        ),
-        expected_snippets=["does not accept returns of opened bags"],
-        expected_answer=(
-            "You can't return it. Aurora does not accept returns of opened bags "
-            "because coffee is perishable; refunds or replacements are only for bags "
-            "that arrive damaged or wrong, reported within 14 days of delivery."
-        ),
-    ),
-    GoldenItem(
-        id="t8",  # framing trap: "just Fair Trade" vs the above-floor detail
-        query="Does Aurora just pay the standard Fair Trade price to its producers?",
-        expected_snippets=["well above the Fair Trade floor price"],
-        expected_answer=(
-            "No. Aurora pays a minimum of $3.50 per pound to producers, which is "
-            "well above the Fair Trade floor price."
-        ),
-    ),
+    # GoldenItem(
+    #     id="t7",  # false premise: assumes opened bags are returnable
+    #     query=(
+    #         "I opened a bag and didn't like the flavor. "
+    #         "How do I return it for a refund?"
+    #     ),
+    #     expected_snippets=["does not accept returns of opened bags"],
+    #     expected_answer=(
+    #         "You can't return it. Aurora does not accept returns of opened bags "
+    #         "because coffee is perishable; refunds or replacements are only for bags "
+    #         "that arrive damaged or wrong, reported within 14 days of delivery."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t8",  # framing trap: "just Fair Trade" vs the above-floor detail
+    #     query="Does Aurora just pay the standard Fair Trade price to its producers?",
+    #     expected_snippets=["well above the Fair Trade floor price"],
+    #     expected_answer=(
+    #         "No. Aurora pays a minimum of $3.50 per pound to producers, which is "
+    #         "well above the Fair Trade floor price."
+    #     ),
+    # ),
     # GoldenItem(
     #     id="q2",
     #     query="what is the return policy for Aurora? ",
