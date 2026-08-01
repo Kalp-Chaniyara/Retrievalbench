@@ -16,11 +16,13 @@ This is NOT trying to beat AutoRAG / RAGAS / MLflow. Don't frame it as novel. Fr
 ## Current state (read before suggesting next steps)
 Phase 2. Build direction is **back-to-front along the main path**.
 
+What's already build:
+1. `rerankers.py`: `Reranker` using **`bge-reranker-v2-m3` via the `rerankers` library** (one API, swappable).
+
 Next, in order:
-2. `rerankers.py`: `Reranker` using **`bge-reranker-v2-m3` via the `rerankers` library** (one API, swappable).
-3. `eval/diagnostics.py`: **F1/F2/F3 rules engine** (Design §5.10) — deterministic labels + plain-language note per failed query, plus an aggregate summary.
-4. `golden.py`: LLM-based golden generator (question / expected answer / `expected_snippets` — verbatim source spans, never chunk ids) + a CLI review step (keep/edit/drop).
-5. `cli.py`: `rbench report run_id` prints the diagnosis ("62% of failures are F1 → try hybrid").
+2. `eval/diagnostics.py`: **F1/F2/F3 rules engine** (Design §5.10) — deterministic labels + plain-language note per ailed query, plus an aggregate summary.
+3. `golden.py`: LLM-based golden generator (question / expected answer / `expected_snippets` — verbatim source spans, never chunk ids) + a CLI review step (keep/edit/drop).
+4. `cli.py`: `rbench report run_id` prints the diagnosis ("62% of failures are F1 → try hybrid").
 
 **We talk to `AsyncOpenAI` directly** via `chat.completions.create`. (An earlier plan to route it through a separate LLM-wrapper library has been dropped — ignore any reference to that.)
 
