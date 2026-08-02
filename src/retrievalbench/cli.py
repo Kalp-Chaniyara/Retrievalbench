@@ -8,9 +8,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from retrievalbench.config import load_config
+from retrievalbench.eval.diagnostics import summarize
 from retrievalbench.golden import GOLDEN_SET, hit_chunk_ids
 from retrievalbench.model import (
     ExperimentRun,
+    FailureMode,
     GoldenItem,
     QueryEvaluation,
     QueryResult,
@@ -37,6 +39,19 @@ JUDGE_MODEL = "gpt-4o-mini"
 def _color_score(score: float) -> str:
     color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
     return f"[{color}]{score:.3f}[/{color}]"
+
+
+# Badge styling per failure mode — shared by the per-query panel and `report`.
+_FAILURE_STYLE: dict[FailureMode, tuple[str, str]] = {
+    FailureMode.NONE: ("PASS", "green"),
+    FailureMode.RETRIEVAL_MISS: ("F1 · retrieval miss", "red"),
+    FailureMode.GENERATION_FAILURE: ("F_GEN · generation failure", "yellow"),
+}
+
+
+def _failure_badge(mode: FailureMode) -> str:
+    label, color = _FAILURE_STYLE.get(mode, (mode.value, "magenta"))
+    return f"[bold {color}]{label}[/bold {color}]"
 
 
 def _chunk_table(chunks: list[RetrievedChunk], hits: set[str]) -> Table:
@@ -107,6 +122,13 @@ def _render_query(
     body.add_row("")
     body.add_row("[bold]Scores[/bold]")
     body.add_row(metrics)
+    if evaluation.failure_mode is not FailureMode.NONE:
+        body.add_row("")
+        body.add_row(
+            f"[bold]Diagnosis[/bold] {_failure_badge(evaluation.failure_mode)}"
+        )
+        if evaluation.diagnosis_note:
+            body.add_row(f"[dim]{evaluation.diagnosis_note}[/dim]")
 
     console.print(
         Panel(
@@ -171,6 +193,46 @@ def run(
         f"\n[dim]saved run[/dim] [bold cyan]{experiment.id}[/bold cyan] "
         f"[dim]→ {store.path}[/dim]"
     )
+
+
+def _render_report(run: ExperimentRun) -> None:
+    """Per-query failure table + aggregate headline — the diagnosis (design
+    §5.10). Recomputed from `run.evaluations` rather than stored, since the
+    summary is a pure aggregation of already-persisted failure_mode values."""
+    golden_by_id = {item.id: item for item in GOLDEN_SET}
+
+    table = Table(title=f"{run.config.name} — diagnosis")
+    table.add_column("query", overflow="fold")
+    table.add_column("status")
+    table.add_column("note", overflow="fold")
+    for evaluation in run.evaluations:
+        item = golden_by_id.get(evaluation.golden_item_id)
+        query = item.query if item is not None else evaluation.golden_item_id
+        table.add_row(
+            query,
+            _failure_badge(evaluation.failure_mode),
+            evaluation.diagnosis_note or "[dim]—[/dim]",
+        )
+
+    summary = summarize(run.evaluations)
+    console.print()
+    console.print(table)
+    console.print()
+    console.print(Panel(summary.headline, border_style="magenta", title="Summary"))
+
+
+@app.command()
+def report(
+    run_id: str = typer.Argument(..., help="Saved run id (see `rbench run` output)."),
+) -> None:
+    """Print the per-query failure diagnosis + aggregate summary for a saved run."""
+    store = RunStore()
+    run = store.get_run(run_id)
+    if run is None:
+        console.print(f"[red]run not found:[/red] {run_id}")
+        _print_available_runs(store)
+        raise typer.Exit(code=1)
+    _render_report(run)
 
 
 # Which aggregate keys `compare` diffs, and how to read each: `higher_is_better`

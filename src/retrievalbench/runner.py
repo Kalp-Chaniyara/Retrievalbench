@@ -15,6 +15,7 @@ from rich.progress import (
 )
 
 from retrievalbench.config import RetrievalConfig
+from retrievalbench.eval.diagnostics import diagnose_run
 from retrievalbench.eval.metric import evaluate_query
 from retrievalbench.generate import build_generator
 from retrievalbench.ingest.index import ensure_indexed
@@ -171,6 +172,16 @@ async def run_experiment(
 
             if progress and task is not None:
                 progress.advance(task)
+
+    # Diagnostics engine (design §5.10): attribute every failed query to F1
+    # (retrieval miss) vs F_GEN (generation failure) and write its note. Runs
+    # once over the whole set of evaluations, gated per-query by the
+    # correctness trigger — passing queries come back unchanged (NONE, None).
+    evaluations, diagnostics_summary = await diagnose_run(
+        query_results, evaluations, golden_set, judge_model=judge_model
+    )
+    if console is not None:
+        console.print(f"[dim]{diagnostics_summary.headline}[/dim]")
 
     created_at = datetime.now()
     run = ExperimentRun(

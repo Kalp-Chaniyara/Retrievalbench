@@ -62,13 +62,19 @@ class EvalScores(BaseModel):
 
 
 class FailureMode(StrEnum):
-    """Canonical RAG failure modes (the wedge). Logic that assigns these is
-    Phase 2; the field exists now so persistence needs no later migration."""
+    """Canonical RAG failure modes (the wedge). Shipped two-class engine
+    (design §5.10): NONE / RETRIEVAL_MISS (F1) / GENERATION_FAILURE (F_GEN),
+    assigned by eval/diagnostics.py. F2/F3/ABSTAIN are the deferred F2/F3 split
+    (§5.10.1, post-ship-gate) — declared now so persistence needs no later
+    migration, but nothing assigns them yet."""
 
-    NONE = "none"  # query passed
-    RETRIEVAL_MISS = "f1"  # right chunk never retrieved
+    NONE = "none"  # query passed (not a failure)
+    RETRIEVAL_MISS = "f1"  # expected evidence never retrieved — deterministic
+    GENERATION_FAILURE = "f_gen"  # evidence retrieved but answer wrong — unattributed
+    # --- Deferred: sub-classes of GENERATION_FAILURE (§5.10.1) ---
     GENERATION_IGNORE = "f2"  # retrieved but the answer ignored it
     GENERATION_ERROR = "f3"  # used the context but still answered wrong
+    ABSTAIN = "abstain"  # failed but unattributable (F2/F3 split only)
 
 
 class QueryResult(BaseModel):
