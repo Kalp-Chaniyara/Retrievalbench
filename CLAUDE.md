@@ -2,10 +2,13 @@
 
 A local-first, config-driven harness for running, evaluating, and **diagnosing** retrieval (RAG) pipelines. Primary purpose is learning retrieval + evaluation deeply by building it from scratch; secondary is a clean, explainable portfolio/OSS artifact.
 
-**The differentiator ("the wedge"):** per-query failure attribution. Every failed query is labelled with one of three canonical RAG failure modes via a *deterministic rules engine* (an LLM only writes the human-readable note, never the classification):
-- **F1 — retrieval miss:** none of the expected chunks were retrieved.
-- **F2 — generation ignore:** the right chunk was retrieved but the answer didn't use it.
-- **F3 — generation error:** the model used the chunk but still answered wrong.
+**The differentiator ("the wedge"):** per-query failure attribution via a *deterministic rules engine* (an LLM only writes the human-readable note, never the classification). **Shipped scope is a two-class engine** — the wedge is *deterministic per-query attribution*, and the F1-vs-generation cut already delivers that:
+- **F1 — retrieval miss (deterministic):** none of the golden item's `expected_snippets` are present in the retrieved chunks (snippet hit-test). Evidence never reached the generator; no prompt/model change fixes this query.
+- **F_GEN — generation failure (unattributed):** evidence *was* retrieved (F1 gate passed) but the answer is still wrong. The shipped engine does not sub-classify *why*.
+
+**A failed query is only attributed after a separate correctness trigger marks it failed** (answer vs `expected_answer`) — a single low RAGAS/DeepEval metric is *not* a failure trigger. Attribution runs only over the failed set. F1 → F_GEN is a **cascade in fixed order** (test F1 first; assign F_GEN only if F1 is false), never independent predicates.
+
+**F2/F3 split is deferred (roadmap, post-ship-gate) — see Design §5.10.1.** It sub-classifies F_GEN into F2 (generator ignored the evidence) vs F3 (generator engaged with it and still erred). The correct discriminator is **claim provenance, NOT faithfulness** (faithfulness can't separate them — it lumps *supported* and *external/parametric* claims together). This needs a hand-written 3-way claim classifier + a judge, so it's inherently non-deterministic and only fires on the already-failed subset — which is why it doesn't clear the ship gate and stays a roadmap item. "Generation failure (unattributed)" is the honest degraded form, not a weakness.
 
 This is NOT trying to beat AutoRAG / RAGAS / MLflow. Don't frame it as novel. Frame it as a from-scratch retrieval-eval harness with failure diagnostics.
 
@@ -20,7 +23,7 @@ What's already build:
 1. `rerankers.py`: `Reranker` using **`bge-reranker-v2-m3` via the `rerankers` library** (one API, swappable).
 
 Next, in order:
-2. `eval/diagnostics.py`: **F1/F2/F3 rules engine** (Design §5.10) — deterministic labels + plain-language note per ailed query, plus an aggregate summary.
+2. `eval/diagnostics.py`: **two-class rules engine** (Design §5.10) — deterministic **F1 (retrieval miss)** vs **F_GEN (generation failure, unattributed)** label + plain-language note per failed query, plus an aggregate summary. Runs only over queries a correctness trigger already marked failed. The F2/F3 split (§5.10.1) is a deferred roadmap item — do **not** build it into the shipped engine.
 3. `golden.py`: LLM-based golden generator (question / expected answer / `expected_snippets` — verbatim source spans, never chunk ids) + a CLI review step (keep/edit/drop).
 4. `cli.py`: `rbench report run_id` prints the diagnosis ("62% of failures are F1 → try hybrid").
 

@@ -115,23 +115,23 @@ Goal: documents → a RAGAS number. Hardcode everything you can.
 
 ## 5. Phase 2 — The wedge (hybrid + rerank + diagnostics) · ~1.5 weeks
 
-This is the highest-value phase. Don't skip the diagnostics — it's the differentiator.
+This is the highest-value phase. Don't skip the diagnostics — it's the differentiator. Ship the **two-class** engine (F1 vs F_GEN); the F2/F3 split is deferred to Phase 3+ (Design §5.10.1) and must not block this phase.
 
 **LEARN (≈2 hrs):**
 - BM25, sparse vectors, Reciprocal Rank Fusion. (45 min)
 - Bi-encoder vs cross-encoder reranking; the retrieve-50→rerank→top-5 pattern. (30 min)
-- The 3 RAG failure modes (F1 retrieval-miss / F2 generation-ignore / F3 generation-error). (20 min)
+- The RAG failure modes as a mental model (F1 retrieval-miss / F2 generation-ignore / F3 generation-error) — but note only F1 is deterministically separable; you ship **F1 vs F_GEN (generation-failure, unattributed)**. The F2/F3 split is deferred (Design §5.10.1). (20 min)
 - Golden-set generation pitfalls (leakage, too-easy questions). (20 min)
 
 **BUILD:**
 1. `store.py` + `retrievers.py`: `HybridRetriever` (Qdrant sparse + dense, RRF fusion).
 2. `rerankers.py`: `Reranker` using **`bge-reranker-v2-m3` via the `rerankers` library** (one API, swappable).
-3. `eval/diagnostics.py`: **F1/F2/F3 rules engine** (Design §5.10) — deterministic labels + plain-language note per failed query, plus an aggregate summary.
+3. `eval/diagnostics.py`: **two-class rules engine** (Design §5.10) — deterministic **F1 (retrieval miss)** vs **F_GEN (generation failure, unattributed)** labels + plain-language note per failed query, plus an aggregate summary. Attribution runs only over queries a correctness trigger already flagged failed. **Do not build the F2/F3 split here** — it's deferred (§5.10.1).
 4. `golden.py`: LLM-based golden generator (question / expected answer / `expected_chunk_ids`) + a CLI review step (keep/edit/drop).
 5. `cli.py`: `rbench report run_id` prints the diagnosis ("62% of failures are F1 → try hybrid").
 
-**MEASURE / DONE-CHECK:** the report attributes failures by mode, and switching dense→hybrid measurably reduces F1.
-**Learning checkpoint:** you can debug a RAG system by failure mode, not vibes. **This is the senior skill.**
+**MEASURE / DONE-CHECK:** the report attributes failures by stage (F1 vs F_GEN), and switching dense→hybrid measurably reduces F1.
+**Learning checkpoint:** you can debug a RAG system by failure *stage*, not vibes — and you can explain why the F1-vs-generation cut is the only deterministic one, and why the F2/F3 split needs a judge. **This is the senior skill.**
 
 ---
 
@@ -143,6 +143,7 @@ This is the highest-value phase. Don't skip the diagnostics — it's the differe
 1. `recommend.py`: recommendation engine — best config within cost/latency budget, with diminishing-returns callouts.
 2. `retrievers.py`: `QueryRewriteRetriever`, `MultiQueryRetriever`.
 3. DeepEval **CI gate** on your own repo: GitHub Action runs the golden set on each PR, fails on metric regression.
+4. **(Optional, if motivated) F2/F3 split (Design §5.10.1):** sub-classify F_GEN via the claim-provenance discriminator (supported / contradicted / external → engagement ratio) with an `ABSTAIN` dead-zone. Hand-written 3-way claim classifier + judge → non-deterministic. Build only after the CI gate is green and the two-class report is clean.
 
 **DONE-CHECK:** `rbench recommend` outputs a justified pipeline choice with cost/latency tradeoffs.
 **Learning checkpoint:** you can answer "which RAG should I build for this corpus and why."
@@ -166,7 +167,7 @@ Build the API **first** (exposing data the engine already produces), then the Re
 2. Endpoints, read-only first:
    - `GET /runs` — list runs (leaderboard data)
    - `GET /runs/{id}` — full run + aggregate
-   - `GET /runs/{id}/diagnostics` — per-query F1/F2/F3 + notes
+   - `GET /runs/{id}/diagnostics` — per-query failure stage (F1 / F_GEN) + notes
    - `GET /runs/{id}/chunks` — chunk viewer data
    - `GET /runs/{id}/retrieval/{query_id}` — retrieved vs reranked chunks
 3. Then one **write** endpoint: `POST /runs` to trigger a run from a config (background task).

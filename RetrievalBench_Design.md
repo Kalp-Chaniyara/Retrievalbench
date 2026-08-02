@@ -26,12 +26,13 @@ A recurring **"How I decided"** callout appears under contested choices, because
 2. A **portfolio artifact**: a typed, async, tested, explainable harness you can defend line-by-line in an interview.
 3. A modestly useful OSS tool *if and only if* the one defensible wedge lands well.
 
-**The wedge:** **per-query failure attribution in plain language**, mapped to the three canonical RAG failure modes:
-- **F1 — Retrieval miss:** the right chunk was never retrieved.
-- **F2 — Generation ignore:** the right chunk was retrieved but the model didn't use it.
-- **F3 — Generation error:** the model used the chunk but still answered wrong.
+**The wedge:** **deterministic per-query failure attribution in plain language.** The shipped engine is **two classes**, because the deterministic F1-vs-generation cut is what delivers the wedge:
+- **F1 — Retrieval miss (deterministic):** the evidence was never retrieved.
+- **F_GEN — Generation failure (unattributed):** the evidence *was* retrieved but the answer is still wrong.
 
-Aggregate scores hide which mode is firing. RetrievalBench's job is to tell you, *per query*, which one happened and why — then aggregate that into a diagnosis. That is the thing most "embed-and-leaderboard" tools do badly, and it's the thing that proves you understand retrieval.
+The three canonical failure modes are still the mental model, but only F1 is deterministically separable from the rest. The finer split — **F2 (model ignored the retrieved evidence)** vs **F3 (model used it and still erred)** — is a **deferred roadmap item** (§5.10.1): it requires a semantic claim-provenance judge, is inherently non-deterministic, and only fires on the already-failed subset, so it does not gate the shippable engine.
+
+Aggregate scores hide which *stage* is firing. RetrievalBench's job is to tell you, *per query and deterministically*, whether the failure was retrieval or generation — then aggregate that into a diagnosis. That is the thing most "embed-and-leaderboard" tools do badly, and it's the thing that proves you understand retrieval.
 
 ---
 
@@ -48,7 +49,7 @@ By shipping the MVP + V2 you will be able to *state, from having built it*:
 
 ### 2.2 Product goals
 - **G1.** Run a corpus through ≥2 retrieval configs and produce comparable RAGAS scores. **[MVP]**
-- **G2.** Attribute every failed query to F1/F2/F3. **[V2 — the wedge]**
+- **G2.** Attribute every failed query to a failure *stage* — deterministically: **F1 (retrieval miss)** vs **F_GEN (generation failure)**. The F2/F3 sub-split of F_GEN is deferred (§5.10.1). **[V2 — the wedge]**
 - **G3.** Turn aggregate failure patterns into a plain-language diagnosis + recommendation. **[V3]**
 - **G4.** Be reproducible: same corpus + same config + same seed → same results. **[MVP, non-negotiable]**
 
@@ -66,7 +67,7 @@ By shipping the MVP + V2 you will be able to *state, from having built it*:
 ### 3.1 One request, end-to-end, in plain English
 *(Per your build-order principle: trace the main path before writing code.)*
 
-> A user points RetrievalBench at a folder of PDFs and a config file. The system **chunks** each document, **embeds** the chunks, and stores them in **Qdrant**. If no golden dataset exists, it **generates** question→expected-context→expected-answer triples from the corpus. The **experiment runner** then, for each query in the golden set: runs the configured **retrieval strategy** to fetch chunks, optionally **reranks** them, feeds the top-k into a **generator** (Chat Completions shape) to produce an answer, and records the retrieved chunks + answer. The **evaluation engine** scores each query with RAGAS (faithfulness, answer relevancy, context precision, context recall). The **diagnostics engine** labels each failed query F1/F2/F3 by comparing what was retrieved vs the expected context vs the answer. Results are persisted to **SQLite**. The user re-runs with a second config; the **recommendation engine** compares the two runs on quality/cost/latency and prints which to use and why.
+> A user points RetrievalBench at a folder of PDFs and a config file. The system **chunks** each document, **embeds** the chunks, and stores them in **Qdrant**. If no golden dataset exists, it **generates** question→expected-context→expected-answer triples from the corpus. The **experiment runner** then, for each query in the golden set: runs the configured **retrieval strategy** to fetch chunks, optionally **reranks** them, feeds the top-k into a **generator** (Chat Completions shape) to produce an answer, and records the retrieved chunks + answer. The **evaluation engine** scores each query with RAGAS (faithfulness, answer relevancy, context precision, context recall). The **diagnostics engine** labels each *failed* query (a query a correctness check already marked wrong) with a deterministic stage: **F1** if the expected evidence was never retrieved, else **F_GEN** (generation failure). Results are persisted to **SQLite**. The user re-runs with a second config; the **recommendation engine** compares the two runs on quality/cost/latency and prints which to use and why.
 
 That paragraph IS the architecture. Everything below is just typing it.
 
@@ -86,7 +87,7 @@ flowchart TD
     E --> RUN
     D --> RUN
     RUN --> H[Evaluation Engine - RAGAS]
-    H --> I[Diagnostics Engine - F1/F2/F3]
+    H --> I[Diagnostics Engine - F1/F_GEN]
     I --> E
     E --> J[Recommendation Engine]
     J --> K[CLI report]
@@ -167,10 +168,14 @@ class QueryResult(BaseModel):
     cost_usd: float
 
 class FailureMode(str, Enum):
-    NONE = "none"          # passed
-    RETRIEVAL_MISS = "f1"  # right chunk never retrieved
-    GENERATION_IGNORE = "f2"  # retrieved but ignored
-    GENERATION_ERROR = "f3"   # used but wrong
+    # --- Shipped two-class engine (§5.10) ---
+    NONE = "none"                 # passed (not a failure; set by the correctness trigger)
+    RETRIEVAL_MISS = "f1"         # expected evidence never retrieved — deterministic
+    GENERATION_FAILURE = "f_gen"  # evidence retrieved but answer wrong — unattributed
+    # --- Deferred: sub-classes of GENERATION_FAILURE, built post-ship-gate (§5.10.1) ---
+    GENERATION_IGNORE = "f2"      # retrieved but ignored (parametric / refusal / off-topic)
+    GENERATION_ERROR = "f3"       # used but wrong (misread / wrong entity / bad synthesis)
+    ABSTAIN = "abstain"           # failed but unattributable — used by the deferred F2/F3 split
 
 class QueryEvaluation(BaseModel):
     golden_item_id: str
@@ -303,15 +308,54 @@ class Generator(Protocol):
 **You learn:** what each metric actually measures; the difference between retrieval metrics (precision/recall) and generation metrics (faithfulness/relevancy).
 
 ### 5.10 Diagnostics engine — **the wedge**
-**Responsibility:** label each query F1/F2/F3 and write a plain-language note.
-**Logic (deterministic rules over the metrics + ground truth):**
-- **F1 Retrieval miss:** none of `expected_chunk_ids` appear in `retrieved` → "The relevant chunk was never retrieved. Likely cause: {dense-only on a keyword query / chunk too small / overlap too low}."
-- **F2 Generation ignore:** expected chunk *was* retrieved (high context recall) but faithfulness/answer correctness low → "Relevant context was retrieved but the answer didn't use it. Likely cause: context buried below top position / prompt not grounding."
-- **F3 Generation error:** context retrieved and faithfulness high but answer still wrong vs expected → "Model used the context but answered incorrectly. Likely cause: reasoning/synthesis, not retrieval."
-- **Aggregation:** count failure modes across the run → "62% of failures are F1 (retrieval misses), concentrated in keyword-style queries → switch dense → hybrid."
-**You learn:** this is where you internalize *how to debug a RAG system*, which is the senior skill.
+**Responsibility:** attribute each *failed* query to a failure **stage** and write a plain-language note. **Shipped scope is a two-class engine.** The F2/F3 split is a deferred roadmap item (§5.10.1).
 
-> **How I decided (rules, not an LLM judge, for F1/F2/F3):** the failure mode is *derivable* from data you already have (did the expected chunk get retrieved? is faithfulness high?). A rules engine is deterministic, free, explainable, and teaches you the causal model. Use the LLM only for the human-readable note, not the classification.
+**Prerequisite — the correctness trigger (a gate, not a stage label).** A query is attributed only *after* it has been marked failed. "Failed" is a **correctness** judgement (the answer vs `expected_answer`), NOT any single RAGAS/DeepEval metric. A low contextual-relevancy or a single 0.0 faithfulness verdict on a query that actually answered correctly is **noise, not a failure** — do not let a metric threshold trigger attribution. Keep the trigger and the attribution separate; attribution runs only over the failed set. (The trigger itself is a correctness signal — e.g. a GEval-style correctness check; note this reintroduces judge non-determinism at the trigger layer, so pin the judge model.)
+
+**Shipped classes — deterministic cascade, fixed order:**
+- **F1 — Retrieval miss (deterministic):** none of the golden item's `expected_snippets` are present in the retrieved chunks (the **snippet hit-test**: a chunk is a hit if it contains a snippet after whitespace/case normalization — see the golden-ground-truth rule in CLAUDE.md; snippets, not chunk ids, are the F1 gate). The evidence never reached the generator, so no prompt/model change can fix this query. Note: *"The relevant evidence was never retrieved → {dense-only on a keyword query / chunk too small / top-k too low}."*
+- **F_GEN — Generation failure (unattributed):** the F1 gate passed (evidence *was* retrieved) but the answer is still wrong. The failure is downstream of retrieval; the shipped engine does **not** sub-classify *why*. Note: *"Relevant evidence was retrieved but the answer is wrong — a generation-stage failure."*
+
+**Cascade, not independent predicates:** test F1 first; assign F_GEN **only if** F1 is false. Independent predicates would let a query match two classes and make the label ambiguous.
+
+**Aggregation:** count classes across the run → "62% of failures are F1, concentrated in keyword-style queries → switch dense → hybrid." This is what `rbench report` prints.
+
+**You learn:** how to debug a RAG system *by stage* rather than by vibes — the senior skill. The deterministic F1 cut is the load-bearing insight.
+
+> **How I decided (two classes, not three — the ship-gate call):** the F1-vs-generation cut is the **only** clean, deterministic cut in the system, and it *already carries the wedge* (deterministic per-query attribution). Splitting F_GEN into F2/F3 requires semantic claim-provenance judging (§5.10.1) — inherently non-deterministic, a bespoke judge call, and it only ever fires on the already-failed subset. That cost does not clear the ship gate. "Generation failure (unattributed)" is the honest **degraded** form of the wedge, not a weakness — the same discipline as an abstain bucket: degrade the hard component to a simpler honest version under time pressure, don't delete the thesis.
+
+> **How I decided (rules, not an LLM judge, for the *shipped* classes):** F1 is derivable from data you already have (did a snippet-bearing chunk get retrieved?), so it stays a deterministic rules engine — free, explainable, and reproducible in CI. The LLM only writes the human-readable note, never the class. This determinism is precisely the property the F2/F3 split *cannot* preserve, which is the other reason that split is deferred.
+
+#### 5.10.1 Deferred — the F2/F3 split (roadmap, post-ship-gate) **[V3+]**
+Build only *after* the two-class engine ships. It deepens the wedge but is not gate-blocking. Written down here so it isn't re-derived later.
+
+Sub-classes of `F_GEN`:
+- **F2 — Generation ignore:** evidence retrieved, generator answered from *outside* it (parametric memory, refusal, off-topic).
+- **F3 — Generation error:** evidence retrieved, generator *engaged* with it and still answered wrong (misread a number, wrong entity of two, bad cross-chunk synthesis, partial answer).
+
+**Discriminator — claim provenance, NOT faithfulness.** Faithfulness cannot split F2 from F3. It partitions the answer's claims into {contradicts / doesn't-contradict}, which puts a **supported** claim and an **external (parametric)** claim on the *same* "faithful" side — that is exactly the distinction you need. It also misses the hardest F3: an answer that faithfully restates a chunk which doesn't actually answer the question scores faithfulness ≈ 1.0 and is still F3. So do not build this on faithfulness — the earlier "low-faithfulness + high-answer-relevancy = F3" rule is **wrong** and is retired here.
+
+Split instead on where each claim in the answer **traces**:
+1. **supported** — traces to a retrieved chunk,
+2. **contradicted** — conflicts with a retrieved chunk,
+3. **external** — about something not in the retrieved chunks at all.
+
+Then:
+```
+engagement = (supported + contradicted) / total_claims
+```
+- **High engagement** → the model's claims are *about* the retrieved evidence → it engaged and still erred → **F3**.
+- **Low engagement** → the claims came from outside the evidence → it ignored what was retrieved → **F2**.
+
+This is faithfulness's two-way split with the "faithful" bucket re-split into *actually-supported* vs *merely-non-contradicting* — i.e. it recovers the information faithfulness throws away. Sanity-check: the faithful-but-wrong F3 above lands as all-`supported` → high engagement → **F3**. Correct.
+
+**Cost & caveats (why it's deferred, not free):**
+- Claim provenance is **semantic entailment** — not substring match, not a cosine threshold (both misclassify). It **needs a judge (LLM or NLI model)**, so F2/F3 is inherently **non-deterministic** even though F1 stays deterministic.
+- Requires a **hand-written three-way claim classifier** (override DeepEval's faithfulness extraction template, or write a bespoke prompt). This encodes a RAG concept → hand-write it, don't generate it.
+- Add an **`ABSTAIN`** class with a **dead-zone** around the engagement threshold: engagement in the ambiguous middle band → `abstain` rather than a forced guess. A **refusal** (near-zero substantive claims, F1 already ruled out) also routes to `abstain` rather than being forced into F2. An engine that admits "unattributable" on the ambiguous ~8% is more trustworthy for a *reliability* tool than one that confidently mislabels.
+- **Open decision before building:** does the claim classifier **reuse** the correctness-trigger judge call, or run as a **second** pass? That decides whether F2/F3 costs one judge call per failed query or two.
+
+> **Degrade-not-delete ladder:** if F2/F3 is still intractable at a future gate, ship `F1 + F_GEN` (current plan). The two-class engine already proves the point the project exists to prove; the split is portfolio-deepening, built in public after the gate.
 
 ### 5.11 Recommendation engine
 **Responsibility:** compare runs → recommend a config with justification across quality/cost/latency.
@@ -360,7 +404,7 @@ retrievalbench/
 │       ├── eval/                # FOLDER: ragas wrapper + diagnostics (≥2 files)
 │       │   ├── __init__.py
 │       │   ├── metrics.py       # RAGAS integration
-│       │   └── diagnostics.py   # F1/F2/F3 rules engine — the wedge
+│       │   └── diagnostics.py   # two-class rules engine (F1 / F_GEN) — the wedge
 │       └── storage.py           # SQLite persistence
 ├── tests/
 ├── configs/                     # example experiment YAMLs
@@ -430,7 +474,7 @@ Goal: one straight line from documents to a score. Hardcode aggressively.
 ### Phase 2 — The wedge · ~1.5 weeks **[V2]**
 - `HybridRetriever` (BM25 + dense, RRF) using Qdrant sparse.
 - `Reranker` (bge-reranker-v2-m3 via `rerankers`).
-- **Diagnostics engine: F1/F2/F3 labeling + plain-language notes.**
+- **Diagnostics engine: two-class labeling (F1 retrieval-miss vs F_GEN generation-failure) + plain-language notes,** gated behind a correctness trigger. The F2/F3 split (§5.10.1) is explicitly out of scope for this phase.
 - LLM golden-set generator with human review.
 - **DoD:** a run report that says "62% of failures are F1, concentrated in keyword queries → try hybrid," and switching to hybrid measurably reduces F1.
 - **Checkpoint:** you can debug a RAG system by failure mode, not vibes.
@@ -439,6 +483,7 @@ Goal: one straight line from documents to a score. Hardcode aggressively.
 - Recommendation engine (Pareto over quality/cost/latency).
 - Query-rewrite + multi-query retrievers.
 - DeepEval CI gate on your own repo.
+- **(Optional, if motivated) F2/F3 split (§5.10.1):** sub-classify F_GEN via the claim-provenance discriminator + `ABSTAIN` dead-zone. Non-deterministic (needs a judge) — build only after the CI gate is green, and only if the two-class report is already clean.
 - Optional: chunk viewer + retrieval viewer UI (the two demo-able screens).
 - **DoD:** `rbench recommend` outputs a justified pipeline choice with cost/latency tradeoffs.
 - **Checkpoint:** you can answer "which RAG should I build for this corpus and why."
@@ -474,4 +519,4 @@ These are genuine forks; each has a default + the tradeoff so you can decide wit
 
 ## 12. One-paragraph summary for an AI coding agent
 
-> Build a local-first Python package (`src/` layout, Pydantic models, async I/O, Typer CLI) that ingests documents, chunks/embeds them into Qdrant, runs configurable retrieval pipelines (dense → hybrid → reranked) over a golden Q&A set, generates answers via a Chat-Completions generator, scores them with RAGAS, and — the differentiator — classifies every failed query as F1 (retrieval miss) / F2 (generation ignore) / F3 (generation error) via a deterministic rules engine, then recommends a config across quality/cost/latency. Build back-to-front along the main path; ship Phase 0 (hardcoded straight line to a score) before adding any plugin abstraction, golden generation, or UI.
+> Build a local-first Python package (`src/` layout, Pydantic models, async I/O, Typer CLI) that ingests documents, chunks/embeds them into Qdrant, runs configurable retrieval pipelines (dense → hybrid → reranked) over a golden Q&A set, generates answers via a Chat-Completions generator, scores them with RAGAS, and — the differentiator — classifies every *failed* query (a query a correctness trigger already marked wrong) as **F1 (retrieval miss)** or **F_GEN (generation failure)** via a deterministic two-class rules engine, then recommends a config across quality/cost/latency. The finer F2/F3 split of F_GEN (claim-provenance, judge-based, non-deterministic) is a deferred roadmap item, not part of the shipped engine. Build back-to-front along the main path; ship Phase 0 (hardcoded straight line to a score) before adding any plugin abstraction, golden generation, or UI.
