@@ -17,26 +17,35 @@ This is NOT trying to beat AutoRAG / RAGAS / MLflow. Don't frame it as novel. Fr
 - `RetrievalBench_Roadmap.md` — phase-by-phase build order with definitions of done.
 
 ## Current state (read before suggesting next steps)
-Phase 2. Build direction is **back-to-front along the main path**.
+**Phase 3.** Build direction is **back-to-front along the main path**.
 
-What's already build:
-1. `rerankers.py`: `Reranker` using **`bge-reranker-v2-m3` via the `rerankers` library** (one API, swappable).
+Phase 2 code is **all built** (every BUILD item, Roadmap §5):
+1. `retrieval/store.py` + `retrieval/retrieval.py`: `QdrantHybridStore` (named dense `semantic` + sparse `text` vectors) and hybrid retrieval with **RRF fusion on rank** (`rrf_k`, default 60).
+2. `retrieval/rerankers.py`: `Reranker` using **`bge-reranker-v2-m3` via the `rerankers` library** (one API, swappable).
+3. `eval/diagnostics.py`: **two-class rules engine** (Design §5.10) — deterministic **F1** vs **F_GEN** + LLM-written note, gated by a GEval correctness trigger, plus `DiagnosticsSummary`.
+4. `golden.py`: LLM golden generator (structured output; every snippet validated verbatim against its source chunk before review) + `rbench gen-golden` keep/edit/drop review. Kept items persist to `GoldenStore` (SQLite) and merge with the hand-written `GOLDEN_SET` at read time.
+5. `cli.py`: commands are `run`, `report`, `gen-golden`, `compare`.
 
-Next, in order:
-2. `eval/diagnostics.py`: **two-class rules engine** (Design §5.10) — deterministic **F1 (retrieval miss)** vs **F_GEN (generation failure, unattributed)** label + plain-language note per failed query, plus an aggregate summary. Runs only over queries a correctness trigger already marked failed. The F2/F3 split (§5.10.1) is a deferred roadmap item — do **not** build it into the shipped engine.
-3. `golden.py`: LLM-based golden generator (question / expected answer / `expected_snippets` — verbatim source spans, never chunk ids) + a CLI review step (keep/edit/drop).
-4. `cli.py`: `rbench report run_id` prints the diagnosis ("62% of failures are F1 → try hybrid").
+**Phase 2 is NOT signed off — two empirical gaps remain (do these before new Phase 3 features):**
+- **No hybrid run has ever been executed.** All 5 saved runs are `retrieval=dense, rerank=False`. The Phase 2 DONE-CHECK is *"switching dense→hybrid measurably reduces F1"* — unverified. `configs/hybrid_reranked.yaml` exists but has never been run.
+- **F1 has never fired.** Every evaluation across every saved run is `none` or `f_gen`; the retrieval-miss branch is unexercised on real data. Either the corpus is too easy or the golden set is too small (1 stored generated item). Grow the golden set / add a keyword-style query that dense retrieval should miss.
+
+Phase 3 targets (Roadmap §6), in order:
+1. `recommend.py`: recommendation engine — best config within a cost/latency budget, with diminishing-returns callouts. `rbench recommend` is the DONE-CHECK.
+2. `retrieval/retrieval.py`: `QueryRewriteRetriever`, `MultiQueryRetriever`.
+3. DeepEval **CI gate**: GitHub Action runs the golden set per PR, fails on metric regression.
+4. *(Optional, only after the CI gate is green)* the F2/F3 split (§5.10.1).
 
 **We talk to `AsyncOpenAI` directly** via `chat.completions.create`. (An earlier plan to route it through a separate LLM-wrapper library has been dropped — ignore any reference to that.)
 
 ## Stack (decided — do not substitute)
 - Python 3.11+, async-native.
 - **uv** for everything — `uv add`, `uv sync`, `uv run`. Never pip/poetry/conda.
-- **Pydantic v2** domain models are the source of truth (`src/retrievalbench/models.py`).
+- **Pydantic v2** domain models are the source of truth (`src/retrievalbench/model.py` — singular).
 - **src/ layout.** Build backend is **Hatchling**; editable install via `uv sync`.
 - Vector store: **Qdrant**, local via Docker.
-- Eval: **RAGAS** (faithfulness, answer relevancy, context precision, context recall).
-- Chunking: **Chonkie** preferred (or standalone `langchain-text-splitters`); not full LangChain.
+- Eval: **DeepEval** — `faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`, plus `GEval` for the diagnostics correctness trigger. (The design docs say RAGAS; DeepEval is what is actually wired up. Don't "fix" the code to match the docs.)
+- Chunking: standalone **`langchain-text-splitters`** (`TokenTextSplitter`, `RecursiveCharacterTextSplitter.from_tiktoken_encoder`); not full LangChain. Chonkie was considered and not used.
 - CLI: **Typer**. Later phases: FastAPI backend + React/Vite frontend.
 
 ## Conventions & hard rules (these are load-bearing — past bugs)
@@ -47,8 +56,16 @@ Next, in order:
 - **Class vs function rule:** use a class when a component has multiple methods sharing one config, needs construction-time validation, or must be a named domain type. **Config binds once at construction (`__init__`); input varies per call.** A constant like `name = "dense"` is a class attribute, not a constructor arg.
 - **Async hygiene:** `await` every client call. Never use a sync client inside an `async` method. Extract the field you need (`.embedding`, `response.choices[0].message.content`) — never append the whole response object. **Batch** embedding calls; don't loop one HTTP request per text.
 - **Reproducibility is non-negotiable (G4):** generation runs at `temperature=0`; seed everything seedable.
-- **Golden ground truth is verbatim source *snippets*, not chunk ids** (`GoldenItem.expected_snippets`). A chunk's `docid_NNNN` id encodes *position*, which shifts with chunk size — so it can't be ground truth for a benchmark that varies chunking. Snippets are config-stable source text; a chunk is a retrieval **hit** if it contains a snippet after whitespace/case normalization, resolved per config via `golden.chunk_matches_snippets` / `hit_chunk_ids` (source docs hard-wrap, so normalize both sides). This is the **F1 (retrieval-miss) gate**; F2/F3 gate on it. Keep snippets short + distinctive so a chunk boundary can't split the match.
-- **Metrics ≠ correctness — and LLM-judge scores are noisy.** DeepEval `faithfulness` measures grounding of the answer's claims against the *retrieved context* (a hallucination check), not correctness vs `expected_answer`; with few claims it's near-binary, so one bad judge verdict → 0.0. A weak judge (`gpt-4o`, `cli.py:JUDGE_MODEL`) produces exactly these false contradictions. Trust the **aggregate mean across the golden set** (what `compare` reads), not any single-query number — and this is *why F1/F2/F3 classification stays a deterministic rules engine, the LLM only writing the note.*
+- **Golden ground truth is verbatim source *snippets*, not chunk ids** (`GoldenItem.expected_snippets`). A chunk's `docid_NNNN` id encodes *position*, which shifts with chunk size — so it can't be ground truth for a benchmark that varies chunking. Snippets are config-stable source text; a chunk is a retrieval **hit** if it contains a snippet after whitespace/case normalization, resolved per config via `golden.chunk_matches_snippets` / `hit_chunk_ids` (source docs hard-wrap, so normalize both sides). This is the **F1 (retrieval-miss) gate**, and F_GEN is whatever survives it (the deferred F2/F3 split would gate on it too). It reads `QueryResult.retrieved` — the full pre-rerank `top_k_retrieve` shortlist — because F1 asks whether the evidence ever reached the pipeline at all, not whether reranking happened to keep it. Keep snippets short + distinctive so a chunk boundary can't split the match.
+- **Metrics ≠ correctness — and LLM-judge scores are noisy.** DeepEval `faithfulness` measures grounding of the answer's claims against the *retrieved context* (a hallucination check), not correctness vs `expected_answer`; with few claims it's near-binary, so one bad judge verdict → 0.0. A weak judge (`gpt-4o-mini`) produces exactly these false contradictions. Trust the **aggregate mean across the golden set** (what `compare` reads), not any single-query number — and this is *why F1/F_GEN classification stays a deterministic rules engine, the LLM only writing the note.*
+- **Model split is deliberate — do not collapse it to one model.** The **judge is `gpt-4o`** (`runner.DEFAULT_JUDGE_MODEL`, `cli.JUDGE_MODEL`); **everything else is `gpt-4o-mini`** — the RAG generator (the system under test), the diagnostics note writer, the golden generator. Two reasons: (a) Design §5.9 — the judge must be stronger than / a different family from the generator, else it grades its own family too leniently and inflates every score; (b) `gpt-4o-mini`'s structured-output call in DeepEval's faithfulness **verdicts** step could fail to terminate on some inputs, hanging a run until the per-attempt timeout. Never "save cost" by moving the judge to mini, and never upgrade the generator to `gpt-4o` — the generator *is* the thing being measured, so changing it breaks comparability with every saved run.
+
+## DeepEval specifics (already-hit gotchas — cost real debugging time)
+- **Scoring goes through `eval/metric.py:Scorer`, not bare metric calls.** `GPTModel._build_client()` constructs a **brand-new `AsyncOpenAI` + httpx connection pool on every LLM call** and never closes it — one query's scoring opened 12 separate TLS connections with zero reuse (verified with `lsof -a -p <pid> -i`). `Scorer` owns one pooled `httpx.AsyncClient`, passes it via `GPTModel(async_http_client=...)`, and exposes `.model` so the diagnostics correctness trigger reuses the same warm connections. `runner.py` builds it once and `aclose()`s it in a `finally`.
+- **Always pass `_show_indicator=False`** to `a_measure`. It defaults to `True` and opens deepeval's own `rich.Progress` (a `Live` display) per metric, which collides with the runner's progress bar.
+- **`DEEPEVAL_TELEMETRY_OPT_OUT=YES` in `.env`** — otherwise every metric call fires PostHog + an `api.ipify.org` lookup on a side channel.
+- **A hang in `_receive_response_headers` is not a network failure.** These requests are non-streaming, so headers only arrive once generation *completes* — blocking there means the model hasn't finished producing, not that the connection broke.
+- Debugging a hang: `ps aux | grep rbench` (0.0% CPU = blocked on I/O), `lsof -a -p <pid> -i -n -P` (stuck connections; the `-a` is required or `-p` is ignored), `sudo uvx py-spy dump --pid <pid>` (live Python stack). Wrap suspect calls in `asyncio.wait_for` to turn a hang into a locatable timeout.
 
 ## Qdrant specifics (already-hit gotchas)
 - **Point IDs must be UUID or unsigned int** — not arbitrary strings. Use a deterministic **UUID5 derived from chunk content**, and keep the human-readable chunk id in the **payload**.
