@@ -16,7 +16,7 @@ from rich.progress import (
 
 from retrievalbench.config import RetrievalConfig
 from retrievalbench.eval.diagnostics import diagnose_run
-from retrievalbench.eval.metric import evaluate_query
+from retrievalbench.eval.metric import Scorer
 from retrievalbench.generate import build_generator
 from retrievalbench.ingest.index import ensure_indexed
 from retrievalbench.model import (
@@ -30,7 +30,16 @@ from retrievalbench.retrieval.rerankers import build_reranker
 from retrievalbench.retrieval.retrieval import build_retriever
 from retrievalbench.storage import RunStore
 
-DEFAULT_JUDGE_MODEL = "gpt-4o-mini"
+# The JUDGE is the one place that needs the bigger model — everything else
+# (generator, note writer, golden generator) stays on gpt-4o-mini:
+#   1. Correctness. Design §5.9: the judge must be stronger than / a different
+#      family from the generator, or it grades its own family too leniently.
+#      With gpt-4o-mini judging a gpt-4o-mini generator you get the false
+#      contradictions CLAUDE.md warns about.
+#   2. Reliability. gpt-4o-mini's structured-output call in DeepEval's
+#      faithfulness verdicts step could fail to terminate on some inputs, which
+#      hung a run until the per-attempt timeout expired. gpt-4o does not.
+DEFAULT_JUDGE_MODEL = "gpt-4o"
 
 
 def _make_run_id(config_name: str, created_at: datetime) -> str:
@@ -109,6 +118,13 @@ async def run_experiment(
     query_results: list[QueryResult] = []
     evaluations: list[QueryEvaluation] = []
 
+    # One pooled HTTP client + judge model for ALL scoring (see metric.Scorer):
+    # deepeval otherwise opens a brand-new connection per LLM call, and cold
+    # connection setup is what intermittently hangs. Warm it before the first
+    # query so nothing races to open a cold connection mid-run.
+    scorer = Scorer(judge_model)
+    await scorer.warmup()
+
     progress = (
         Progress(
             SpinnerColumn(),
@@ -155,8 +171,8 @@ async def run_experiment(
             answer = await generator.generate(item.query, context)
             latency_ms = (time.perf_counter() - started) * 1000
 
-            scores = await evaluate_query(
-                judge_model, item.query, answer, item.expected_answer, context
+            scores = await scorer.evaluate_query(
+                item.query, answer, item.expected_answer, context
             )
 
             query_results.append(
@@ -177,9 +193,14 @@ async def run_experiment(
     # (retrieval miss) vs F_GEN (generation failure) and write its note. Runs
     # once over the whole set of evaluations, gated per-query by the
     # correctness trigger — passing queries come back unchanged (NONE, None).
-    evaluations, diagnostics_summary = await diagnose_run(
-        query_results, evaluations, golden_set, judge_model=judge_model
-    )
+    # scorer.model (not the model NAME) so the correctness trigger scores over
+    # the same warm pooled connections instead of opening fresh ones.
+    try:
+        evaluations, diagnostics_summary = await diagnose_run(
+            query_results, evaluations, golden_set, judge_model=scorer.model
+        )
+    finally:
+        await scorer.aclose()
     if console is not None:
         console.print(f"[dim]{diagnostics_summary.headline}[/dim]")
 

@@ -5,12 +5,23 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.table import Table
 
 from retrievalbench.config import load_config
 from retrievalbench.eval.diagnostics import summarize
-from retrievalbench.golden import GOLDEN_SET, hit_chunk_ids
+from retrievalbench.golden import (
+    DEFAULT_GENERATOR_MODEL,
+    GOLDEN_SET,
+    candidate_to_golden_item,
+    generate_candidates,
+    hit_chunk_ids,
+)
+from retrievalbench.ingest.chunkers import build_chunker
+from retrievalbench.ingest.index import CORPORA_DIR
+from retrievalbench.ingest.loader import load_corpus
 from retrievalbench.model import (
+    Chunk,
     ExperimentRun,
     FailureMode,
     GoldenItem,
@@ -19,7 +30,7 @@ from retrievalbench.model import (
     RetrievedChunk,
 )
 from retrievalbench.runner import run_experiment
-from retrievalbench.storage import RunStore
+from retrievalbench.storage import GoldenStore, RunStore
 
 load_dotenv()
 
@@ -33,7 +44,17 @@ def main() -> None:
 
 
 CORPUS_ID = "sample_data1"  # folder under data/corpora/ + the index-cache key
-JUDGE_MODEL = "gpt-4o-mini"
+# Judge only — see runner.DEFAULT_JUDGE_MODEL for why this one is not the mini.
+JUDGE_MODEL = "gpt-4o"
+
+
+def _golden_set(corpus_id: str) -> list[GoldenItem]:
+    """The effective golden set for a corpus: the hand-written, git-versioned
+    GOLDEN_SET literal plus whatever `rbench gen-golden` has generated and a
+    human kept for this corpus (GoldenStore). Ids never collide — generated
+    items are 'gen_'-prefixed — so this is a plain concatenation."""
+    store = GoldenStore()
+    return GOLDEN_SET + store.load_golden_set(corpus_id)
 
 
 def _color_score(score: float) -> str:
@@ -112,9 +133,7 @@ def _render_query(
     body.add_row(retrieved_table)
     if reranked_table is not None:
         body.add_row("")
-        body.add_row(
-            f"[bold]Reranked → context (top {len(result.reranked)})[/bold]"
-        )
+        body.add_row(f"[bold]Reranked → context (top {len(result.reranked)})[/bold]")
         body.add_row(reranked_table)
     body.add_row("")
     body.add_row(f"[bold]Answer[/bold] [dim]({result.latency_ms:.0f} ms)[/dim]")
@@ -161,7 +180,7 @@ def _render_summary(run: ExperimentRun) -> None:
 
 
 def _render_run(run: ExperimentRun) -> None:
-    golden_by_id = {item.id: item for item in GOLDEN_SET}
+    golden_by_id = {item.id: item for item in _golden_set(run.corpus_id)}
     eval_by_id = {ev.golden_item_id: ev for ev in run.evaluations}
     for index, result in enumerate(run.query_results, start=1):
         item = golden_by_id[result.golden_item_id]
@@ -181,7 +200,7 @@ def run(
     experiment = asyncio.run(
         run_experiment(
             cfg,
-            GOLDEN_SET,
+            _golden_set(CORPUS_ID),
             corpus_id=CORPUS_ID,
             judge_model=JUDGE_MODEL,
             store=store,
@@ -199,7 +218,7 @@ def _render_report(run: ExperimentRun) -> None:
     """Per-query failure table + aggregate headline — the diagnosis (design
     §5.10). Recomputed from `run.evaluations` rather than stored, since the
     summary is a pure aggregation of already-persisted failure_mode values."""
-    golden_by_id = {item.id: item for item in GOLDEN_SET}
+    golden_by_id = {item.id: item for item in _golden_set(run.corpus_id)}
 
     table = Table(title=f"{run.config.name} — diagnosis")
     table.add_column("query", overflow="fold")
@@ -233,6 +252,112 @@ def report(
         _print_available_runs(store)
         raise typer.Exit(code=1)
     _render_report(run)
+
+
+def _render_candidate(
+    index: int,
+    total: int,
+    chunk: Chunk,
+    question: str,
+    expected_answer: str,
+    snippets: list[str],
+) -> None:
+    body = Table.grid(padding=(0, 0))
+    body.add_row(f"[bold]Source chunk[/bold] [dim]({chunk.id})[/dim]")
+    body.add_row(chunk.text)
+    body.add_row("")
+    body.add_row(f"[bold]Question[/bold]  {question}")
+    body.add_row(f"[bold]Expected answer[/bold]  {expected_answer}")
+    body.add_row(f"[bold]Snippets[/bold]  {snippets}")
+    console.print(
+        Panel(
+            body,
+            title=f"[bold]Candidate {index}/{total}[/bold]",
+            title_align="left",
+            border_style="cyan",
+        )
+    )
+
+
+@app.command("gen-golden")
+def gen_golden(
+    config: str = typer.Option(
+        "configs/baseline.yaml",
+        "--config",
+        "-c",
+        help="Chunking config to sample from.",
+    ),
+    corpus_id: str = typer.Option(
+        CORPUS_ID, "--corpus-id", help="Corpus to generate from."
+    ),
+    n: int = typer.Option(
+        10, "--n", help="Number of chunks to sample and generate candidates from."
+    ),
+    seed: int = typer.Option(42, "--seed", help="Sampling seed (reproducibility, G4)."),
+    model: str = typer.Option(
+        DEFAULT_GENERATOR_MODEL, "--model", help="Generator model."
+    ),
+) -> None:
+    """Generate candidate golden items from the corpus, review each one
+    (keep/edit/drop), and persist kept items to the corpus's stored golden set."""
+    cfg = load_config(config)
+    corpus_dir = CORPORA_DIR / corpus_id
+    documents = load_corpus(str(corpus_dir))
+    chunker = build_chunker(cfg.chunking)
+    chunks: list[Chunk] = [c for doc in documents for c in chunker.chunk(doc)]
+    if not chunks:
+        console.print(f"[red]no chunks found under {corpus_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[dim]generating up to {n} candidate(s) from {len(chunks)} chunks…[/dim]"
+    )
+    candidates = asyncio.run(generate_candidates(chunks, model=model, n=n, seed=seed))
+    console.print(
+        f"[dim]{len(candidates)}/{n} candidates passed verbatim validation[/dim]\n"
+    )
+
+    kept: list[GoldenItem] = []
+    for index, (chunk, candidate) in enumerate(candidates, start=1):
+        question, expected_answer = candidate.question, candidate.expected_answer
+        _render_candidate(
+            index,
+            len(candidates),
+            chunk,
+            question,
+            expected_answer,
+            candidate.expected_snippets,
+        )
+
+        choice = Prompt.ask(
+            "[k]eep / [e]dit / [d]rop", choices=["k", "e", "d"], default="k"
+        )
+        if choice == "d":
+            continue
+        if choice == "e":
+            question = Prompt.ask("Question", default=question)
+            expected_answer = Prompt.ask("Expected answer", default=expected_answer)
+
+        kept.append(
+            candidate_to_golden_item(
+                candidate.model_copy(
+                    update={"question": question, "expected_answer": expected_answer}
+                )
+            )
+        )
+
+    if not kept:
+        console.print("\n[dim]no items kept.[/dim]")
+        return
+
+    store = GoldenStore()
+    existing = store.load_golden_set(corpus_id)
+    store.save_golden_set(corpus_id, existing + kept)
+    total = len(existing) + len(kept)
+    console.print(
+        f"\n[green]saved {len(kept)} item(s)[/green] to the golden set for "
+        f"[cyan]{corpus_id}[/cyan] [dim](total stored: {total})[/dim]"
+    )
 
 
 # Which aggregate keys `compare` diffs, and how to read each: `higher_is_better`

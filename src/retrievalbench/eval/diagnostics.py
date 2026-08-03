@@ -1,6 +1,7 @@
 import asyncio
 
 from deepeval.metrics import GEval
+from deepeval.models.base_model import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase, SingleTurnParams
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -11,6 +12,11 @@ from retrievalbench.model import FailureMode, GoldenItem, QueryEvaluation, Query
 DEFAULT_NOTE_MODEL = "gpt-4o-mini"
 CORRECTNESS_THRESHOLD = 0.5
 
+# A model NAME makes deepeval build a fresh client per call; a built model
+# (metric.Scorer.model) reuses one warm pooled connection. Both are accepted so
+# the module stays usable standalone, but callers should pass the built model.
+JudgeModel = str | DeepEvalBaseLLM
+
 _NOTE_SYSTEM_PROMPT = (
     "You write a one-sentence, plain-language note explaining a RAG failure for "
     "a report reader. The failure stage has already been decided by a separate "
@@ -18,7 +24,7 @@ _NOTE_SYSTEM_PROMPT = (
 )
 
 
-def _correctness_metric(judge_model: str) -> GEval:
+def _correctness_metric(judge_model: JudgeModel) -> GEval:
     """The correctness trigger (design §5.10 prerequisite): a GEval check of the
     answer against `expected_answer` — deliberately NOT a RAGAS/DeepEval metric
     threshold, since one low faithfulness/relevancy score on an otherwise-correct
@@ -44,7 +50,7 @@ def _correctness_metric(judge_model: str) -> GEval:
 
 
 async def is_failed(
-    judge_model: str, query: str, answer: str, expected_answer: str
+    judge_model: JudgeModel, query: str, answer: str, expected_answer: str
 ) -> bool:
     """True if the correctness trigger marks this query failed. `classify_failure`
     (attribution) must only run on queries where this returns True."""
@@ -52,7 +58,9 @@ async def is_failed(
     test_case = LLMTestCase(
         input=query, actual_output=answer, expected_output=expected_answer
     )
-    await metric.a_measure(test_case)
+    # _show_indicator=False: see eval/metric.py's _measure for why — deepeval's
+    # own rich.Progress per call collides with concurrent calls + our Progress.
+    await metric.a_measure(test_case, _show_indicator=False)
     return not metric.is_successful()
 
 
@@ -113,7 +121,7 @@ async def _write_note(
 async def diagnose_query(
     client: AsyncOpenAI,
     note_model: str,
-    judge_model: str,
+    judge_model: JudgeModel,
     item: GoldenItem,
     result: QueryResult,
 ) -> tuple[FailureMode, str | None]:
@@ -171,7 +179,7 @@ async def diagnose_run(
     evaluations: list[QueryEvaluation],
     golden_set: list[GoldenItem],
     *,
-    judge_model: str,
+    judge_model: JudgeModel,
     note_model: str = DEFAULT_NOTE_MODEL,
 ) -> tuple[list[QueryEvaluation], DiagnosticsSummary]:
     """Attribute every failed query and summarize. Returns updated

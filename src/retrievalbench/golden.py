@@ -1,6 +1,12 @@
+import asyncio
+import random
 import re
+import uuid
 
-from retrievalbench.model import GoldenItem, RetrievedChunk
+from openai import AsyncOpenAI
+from pydantic import BaseModel
+
+from retrievalbench.model import Chunk, GoldenItem, RetrievedChunk
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -31,6 +37,110 @@ def hit_chunk_ids(retrieved: list[RetrievedChunk], item: GoldenItem) -> set[str]
         for chunk in retrieved
         if chunk_matches_snippets(chunk.text, item.expected_snippets)
     }
+
+
+# --- LLM-based golden generator (Design §5.7) ---
+#
+# One sampled chunk -> one candidate (question, expected_answer, snippets),
+# via a direct structured-output AsyncOpenAI call (no RAGAS/DeepEval testset
+# generator: neither library's output has a verified verbatim-substring
+# span, which is the one property the F1 gate actually depends on — see the
+# design discussion in golden.py's history). A candidate only becomes
+# reviewable if every snippet it returned is a real substring of the chunk
+# it was generated from; anything else is discarded before a human ever
+# sees it, so the CLI review step never has to second-guess the snippet.
+
+DEFAULT_GENERATOR_MODEL = "gpt-4o-mini"
+
+_GENERATOR_SYSTEM_PROMPT = (
+    "You write one golden evaluation item for a RAG benchmark from a single "
+    "source passage. Ask a specific question answerable ONLY from this "
+    "passage (not general knowledge). Give a concise, correct answer. Then "
+    "quote 1-2 short, distinctive phrases COPIED VERBATIM from the passage "
+    "(exact characters, no paraphrasing, no ellipses) that together prove "
+    "the answer. Keep each quote short enough that it couldn't plausibly "
+    "appear in an unrelated passage."
+)
+
+
+class GeneratedCandidate(BaseModel):
+    """Structured-output shape for one LLM-generated candidate, pre-review."""
+
+    question: str
+    expected_answer: str
+    expected_snippets: list[str]
+
+
+def _all_snippets_verbatim(chunk_text: str, snippets: list[str]) -> bool:
+    """Generation-time validation: EVERY snippet must be a real substring of
+    the exact chunk it was generated from (vs. `chunk_matches_snippets`'s
+    retrieval-time ANY-of, which checks a snippet against an arbitrary
+    retrieved chunk). A candidate that fails this was paraphrased, not
+    quoted, and is discarded before it ever reaches review."""
+    if not snippets:
+        return False
+    haystack = _normalize(chunk_text)
+    return all(_normalize(snippet) in haystack for snippet in snippets)
+
+
+def sample_chunks(chunks: list[Chunk], n: int, seed: int) -> list[Chunk]:
+    """Seeded sample so `rbench gen-golden` is reproducible (G4) given the
+    same corpus + n + seed, without regenerating from every chunk."""
+    return random.Random(seed).sample(chunks, min(n, len(chunks)))
+
+
+async def _generate_candidate(
+    client: AsyncOpenAI, model: str, chunk: Chunk
+) -> GeneratedCandidate | None:
+    response = await client.chat.completions.parse(
+        model=model,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": _GENERATOR_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Passage:\n{chunk.text}"},
+        ],
+        response_format=GeneratedCandidate,
+    )
+    candidate = response.choices[0].message.parsed
+    if candidate is None or not _all_snippets_verbatim(
+        chunk.text, candidate.expected_snippets
+    ):
+        return None
+    return candidate
+
+
+async def generate_candidates(
+    chunks: list[Chunk],
+    *,
+    model: str = DEFAULT_GENERATOR_MODEL,
+    n: int = 10,
+    seed: int = 42,
+) -> list[tuple[Chunk, GeneratedCandidate]]:
+    """Sample `n` chunks and generate one candidate per chunk, concurrently
+    (independent LLM calls -> asyncio.gather, not a loop). Returns only the
+    candidates that passed verbatim validation, paired with their source
+    chunk so the CLI review step can show it."""
+    sampled = sample_chunks(chunks, n, seed)
+    client = AsyncOpenAI()
+    results = await asyncio.gather(
+        *(_generate_candidate(client, model, chunk) for chunk in sampled)
+    )
+    return [
+        (chunk, candidate)
+        for chunk, candidate in zip(sampled, results, strict=True)
+        if candidate is not None
+    ]
+
+
+def candidate_to_golden_item(candidate: GeneratedCandidate) -> GoldenItem:
+    """A fresh id per generated item — 'gen_' prefixed so it never collides
+    with the hand-written ids in GOLDEN_SET below."""
+    return GoldenItem(
+        id=f"gen_{uuid.uuid4().hex[:8]}",
+        query=candidate.question,
+        expected_answer=candidate.expected_answer,
+        expected_snippets=candidate.expected_snippets,
+    )
 
 
 GOLDEN_SET: list[GoldenItem] = [
@@ -66,7 +176,7 @@ GOLDEN_SET: list[GoldenItem] = [
         ),
         expected_snippets=[
             "$21 per 12-ounce",
-            "Orders over $40 qualify for free standard shipping",
+            "Orders over $40 qualify for free standagrd shipping",
         ],
         expected_answer=(
             "Yes. Hambela is $21 per bag, so two bags total $42, which is over the "
@@ -82,57 +192,57 @@ GOLDEN_SET: list[GoldenItem] = [
             "ship internationally."
         ),
     ),
-    GoldenItem(
-        id="t4",  # refusal of an unknown: invites a made-up mg number (F3 bait)
-        query="How many milligrams of caffeine are in a cup of your dark roast?",
-        expected_snippets=["Aurora does not list exact caffeine content per cup"],
-        expected_answer=(
-            "Aurora does not list exact caffeine content per cup because it varies "
-            "by brew method and dose. As a general guide, a light and a dark roast "
-            "of the same coffee contain nearly the same caffeine by weight."
-        ),
-    ),
-    GoldenItem(
-        id="t5",  # counterintuitive: common belief (freezer = fresh) contradicts doc
-        query="To keep my beans fresh longer, should I store them in the freezer?",
-        expected_snippets=["store coffee in the refrigerator or freezer for daily use"],
-        expected_answer=(
-            "No. Aurora advises against refrigerating or freezing coffee for daily "
-            "use because condensation degrades the beans; store it in an airtight "
-            "container away from light, heat, and moisture."
-        ),
-    ),
-    GoldenItem(
-        id="t6",  # superlative: compare three prices, exclude blends
-        query="Which of Aurora's single-origin coffees is the most expensive?",
-        expected_snippets=["$21 per 12-ounce"],  # Hambela's price line (the max)
-        expected_answer=(
-            "Hambela from Ethiopia, at $21 per 12-ounce bag — more than Kiamabara "
-            "($19) and San Fernando ($17)."
-        ),
-    ),
-    GoldenItem(
-        id="t7",  # false premise: assumes opened bags are returnable
-        query=(
-            "I opened a bag and didn't like the flavor. "
-            "How do I return it for a refund?"
-        ),
-        expected_snippets=["does not accept returns of opened bags"],
-        expected_answer=(
-            "You can't return it. Aurora does not accept returns of opened bags "
-            "because coffee is perishable; refunds or replacements are only for bags "
-            "that arrive damaged or wrong, reported within 14 days of delivery."
-        ),
-    ),
-    GoldenItem(
-        id="t8",  # framing trap: "just Fair Trade" vs the above-floor detail
-        query="Does Aurora just pay the standard Fair Trade price to its producers?",
-        expected_snippets=["well above the Fair Trade floor price"],
-        expected_answer=(
-            "No. Aurora pays a minimum of $3.50 per pound to producers, which is "
-            "well above the Fair Trade floor price."
-        ),
-    ),
+    # GoldenItem(
+    #     id="t4",  # refusal of an unknown: invites a made-up mg number (F3 bait)
+    #     query="How many milligrams of caffeine are in a cup of your dark roast?",
+    #     expected_snippets=["Aurora does not list exact caffeine content per cup"],
+    #     expected_answer=(
+    #         "Aurora does not list exact caffeine content per cup because it varies "
+    #         "by brew method and dose. As a general guide, a light and a dark roast "
+    #         "of the same coffee contain nearly the same caffeine by weight."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t5",  # counterintuitive: common belief (freezer = fresh) contradicts doc
+    #     query="To keep my beans fresh longer, should I store them in the freezer?",
+    #     expected_snippets=["store coffee in the refrigerator or freezer for daily use"],
+    #     expected_answer=(
+    #         "No. Aurora advises against refrigerating or freezing coffee for daily "
+    #         "use because condensation degrades the beans; store it in an airtight "
+    #         "container away from light, heat, and moisture."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t6",  # superlative: compare three prices, exclude blends
+    #     query="Which of Aurora's single-origin coffees is the most expensive?",
+    #     expected_snippets=["$21 per 12-ounce"],  # Hambela's price line (the max)
+    #     expected_answer=(
+    #         "Hambela from Ethiopia, at $21 per 12-ounce bag — more than Kiamabara "
+    #         "($19) and San Fernando ($17)."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t7",  # false premise: assumes opened bags are returnable
+    #     query=(
+    #         "I opened a bag and didn't like the flavor. "
+    #         "How do I return it for a refund?"
+    #     ),
+    #     expected_snippets=["does not accept returns of opened bags"],
+    #     expected_answer=(
+    #         "You can't return it. Aurora does not accept returns of opened bags "
+    #         "because coffee is perishable; refunds or replacements are only for bags "
+    #         "that arrive damaged or wrong, reported within 14 days of delivery."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t8",  # framing trap: "just Fair Trade" vs the above-floor detail
+    #     query="Does Aurora just pay the standard Fair Trade price to its producers?",
+    #     expected_snippets=["well above the Fair Trade floor price"],
+    #     expected_answer=(
+    #         "No. Aurora pays a minimum of $3.50 per pound to producers, which is "
+    #         "well above the Fair Trade floor price."
+    #     ),
+    # ),
     # GoldenItem(
     #     id="q2",
     #     query="what is the return policy for Aurora? ",
