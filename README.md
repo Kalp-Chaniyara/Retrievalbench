@@ -152,8 +152,8 @@ You'll get a per-query panel — the query, the top-k retrieved chunks marked �
 | Embed (batched) | `retrieval/embedders.py` | `text-embedding-3-small`, dim 1536 |
 | Store | `retrieval/store.py` | Qdrant, cosine; point id = UUID5 of chunk id |
 | Retrieve top-k | `retrieval/retrieval.py` | `query_points`, `TOP_K = 5` |
-| Generate grounded answer | `generate.py` | `gpt-4o-mini`, `temperature=0`, "answer only from context" |
-| Score | `eval/metric.py` | DeepEval 4 metrics, judged by `gpt-4o-mini`, run concurrently |
+| Generate grounded answer | `generate.py` | `gpt-4o`, `temperature=0`, "answer only from context" |
+| Score | `eval/metric.py` | DeepEval 4 metrics, judged by `gpt-4o`, run concurrently |
 | Orchestrate + render | `cli.py` | `rbench run` |
 
 Domain types (`Document`, `Chunk`, `RetrievedChunk`, `GoldenItem`, `EvalScores`, …) are Pydantic v2 models in `model.py` — the single source of truth.
@@ -162,7 +162,7 @@ Domain types (`Document`, `Chunk`, `RetrievedChunk`, `GoldenItem`, `EvalScores`,
 
 ```python
 COLLECTION = "sample_data1"
-JUDGE_MODEL = "gpt-4o-mini"
+JUDGE_MODEL = "gpt-4o"
 TOP_K = 5
 ```
 
@@ -177,7 +177,7 @@ TOP_K = 5
 
 ## A note on cost
 
-Every `rbench run` makes, per query: 1 embedding call + 1 generation call + **4 LLM-judge metrics** (each spawning several sub-calls). With ~15 golden items that's well over a hundred OpenAI requests. It's cheap on `gpt-4o-mini` but not free — mind your usage.
+Every `rbench run` makes, per query: 1 embedding call + 1 generation call + **4 LLM-judge metrics** (each spawning several sub-calls). With ~15 golden items that's well over a hundred OpenAI requests. It's cheap on `gpt-4o` but not free — mind your usage.
 
 ---
 

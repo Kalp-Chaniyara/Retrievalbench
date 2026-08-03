@@ -429,7 +429,7 @@ chunking: { type: recursive, size: 800, overlap: 150 }
 embedding: { model: bge-small-en-v1.5, provider: local }
 retrieval: { type: hybrid, fusion: rrf }
 reranker: { model: bge-reranker-v2-m3 }
-generation: { model: gpt-4o-mini, provider: openai }
+generation: { model: gpt-4o, provider: openai }
 evaluation: { judge_model: claude-haiku, metrics: [faithfulness, answer_relevancy, context_precision, context_recall] }
 top_k_retrieve: 50
 top_k_final: 5
