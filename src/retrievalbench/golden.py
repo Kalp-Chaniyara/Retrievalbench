@@ -176,7 +176,7 @@ GOLDEN_SET: list[GoldenItem] = [
         ),
         expected_snippets=[
             "$21 per 12-ounce",
-            "Orders over $40 qualify for free standagrd shipping",
+            "Orders over $40 qualify for free standard shipping",
         ],
         expected_answer=(
             "Yes. Hambela is $21 per bag, so two bags total $42, which is over the "

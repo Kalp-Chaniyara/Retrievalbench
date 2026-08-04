@@ -98,9 +98,7 @@ async def run_experiment(
         config.retrieval, collection=collection, dim=embedder.dim
     )
     # Optional stage: None -> the runner just slices retrieval order to top_k_final.
-    reranker = (
-        build_reranker(config.reranker) if config.reranker is not None else None
-    )
+    reranker = build_reranker(config.reranker) if config.reranker is not None else None
     generator = build_generator(config.generation)
 
     queries = [item.query for item in golden_set]

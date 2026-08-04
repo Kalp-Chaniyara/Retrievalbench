@@ -9,13 +9,23 @@ wheels/
 # Virtual environments
 .venv
 
-/data/corpora
+# data/ holds BOTH Qdrant's storage (aliases/, collections/, raft_state.json)
+# and the corpora. Ignore everything under it, then re-include only the corpus
+# that CI and the golden set depend on. Git cannot re-include a file whose
+# parent directory is excluded, so each level is un-ignored step by step.
+#
+# The corpus is committed on purpose: GoldenItem.expected_snippets must exist
+# VERBATIM in these documents, so the golden set and the corpus are a matched
+# pair. Versioning one without the other is how a typo'd snippet survives
+# unnoticed (tests/test_golden.py guards exactly this).
+/data/*
+!/data/corpora/
+/data/corpora/*
+!/data/corpora/sample_data1/
 
 /qdrant_storage
 
 /src/scratch.py
-
-/data
 
 *.db
 
