@@ -31,7 +31,10 @@ Phase 2 code is **all built** (every BUILD item, Roadmap §5):
 - **F1 has never fired.** Every evaluation across every saved run is `none` or `f_gen`; the retrieval-miss branch is unexercised on real data. Either the corpus is too easy or the golden set is too small (1 stored generated item). Grow the golden set / add a keyword-style query that dense retrieval should miss.
 
 Phase 3 targets (Roadmap §6), in order:
-1. `recommend.py`: recommendation engine — best config within a cost/latency budget, with diminishing-returns callouts. `rbench recommend` is the DONE-CHECK.
+1. ~~`recommend.py`~~ **BUILT.** `rbench recommend` ranks measured configs on quality/cost/latency with Pareto domination, a diminishing-returns callout, and confound + resolution caveats. Two rules it encodes, both load-bearing:
+   - **Quality = correctness PASS RATE** (`failure_mode == NONE`), never the mean of the four metrics. Ranking on metric means makes a pipeline that answers "I don't know" everywhere the *winner* — faithfulness returns a hardcoded `1` when the answer has zero claims, and context_precision/recall never see the answer at all. Faithfulness is a tie-break only. This is why the recommender **depends on** the diagnostics engine: no `failure_mode` → no trustworthy pass rate.
+   - **Quality in percentage POINTS, cost/latency as ratios.** 50%→83% is `+33 points`, not "+66%".
+   - Cost is **pipeline-only** (generation tokens). Priced in `generate._PRICE_PER_1M`; an unpriced model raises at construction so a run can never silently report $0.00.
 2. `retrieval/retrieval.py`: `QueryRewriteRetriever`, `MultiQueryRetriever`.
 3. DeepEval **CI gate**: GitHub Action runs the golden set per PR, fails on metric regression.
 4. *(Optional, only after the CI gate is green)* the F2/F3 split (§5.10.1).
@@ -50,7 +53,8 @@ Phase 3 targets (Roadmap §6), in order:
 
 ## Conventions & hard rules (these are load-bearing — past bugs)
 - **Imports are `from retrievalbench...`**, never `src.retrievalbench...`. The `src.` prefix breaks under src layout.
-- **Folder only when ≥2 cohesive files belong together** (`ingest/`, `retrieval/`, `eval/`); flat single files otherwise (`generate.py`, `golden.py`, `storage.py`). Split a file into a folder when it grows a second file, not before.
+- **Folder only when ≥2 cohesive files belong together** (`ingest/`, `retrieval/`, `eval/`); flat single files otherwise (`generate.py`, `golden.py`, `storage.py`, `recommend.py`). Split a file into a folder when it grows a second file, not before.
+- **Every Pydantic model that crosses a module boundary lives in `model.py`** (Design §4/§6: "all Pydantic domain models"). A component module holds *logic*, not the types its callers need — `EvalScores` is produced by `eval/metric.py` and `DiagnosticsSummary` by `eval/diagnostics.py`, yet both live in `model.py`, and `Recommendation`/`ConfigCandidate`/`Budget` follow the same rule. Two deliberate exceptions: `config.py` owns the YAML-input models (Design §6 assigns it that job), and a model that never leaves its module — like `golden.GeneratedCandidate`, an LLM structured-output schema — stays local.
 - **Pydantic v2 / modern syntax only:** `X | None`, built-in generics (`list[str]`, `dict[str, str]`). Never `Optional`/`List` from `typing`.
 - **API keys come from environment variables** via `pydantic-settings` `BaseSettings`. `AsyncOpenAI()` auto-reads `OPENAI_API_KEY` — do not pass the key explicitly. Never put secrets in YAML or domain models; never log or serialize them.
 - **Class vs function rule:** use a class when a component has multiple methods sharing one config, needs construction-time validation, or must be a named domain type. **Config binds once at construction (`__init__`); input varies per call.** A constant like `name = "dense"` is a class attribute, not a constructor arg.
