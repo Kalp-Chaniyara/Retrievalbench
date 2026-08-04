@@ -4,10 +4,15 @@ from deepeval.metrics import GEval
 from deepeval.models.base_model import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase, SingleTurnParams
 from openai import AsyncOpenAI
-from pydantic import BaseModel
 
 from retrievalbench.golden import hit_chunk_ids
-from retrievalbench.model import FailureMode, GoldenItem, QueryEvaluation, QueryResult
+from retrievalbench.model import (
+    DiagnosticsSummary,
+    FailureMode,
+    GoldenItem,
+    QueryEvaluation,
+    QueryResult,
+)
 
 DEFAULT_NOTE_MODEL = "gpt-4o-mini"
 CORRECTNESS_THRESHOLD = 0.5
@@ -135,30 +140,6 @@ async def diagnose_query(
     failure_mode = classify_failure(result, item)
     note = await _write_note(client, note_model, failure_mode, item, result)
     return failure_mode, note
-
-
-class DiagnosticsSummary(BaseModel):
-    """Aggregate over one run's failures — what `rbench report` prints."""
-
-    total_queries: int
-    failed_count: int
-    f1_count: int
-    f_gen_count: int
-
-    @property
-    def f1_share(self) -> float:
-        """Share of FAILED queries (not all queries) attributed to F1."""
-        return self.f1_count / self.failed_count if self.failed_count else 0.0
-
-    @property
-    def headline(self) -> str:
-        if self.failed_count == 0:
-            return f"0/{self.total_queries} queries failed."
-        return (
-            f"{self.failed_count}/{self.total_queries} queries failed — "
-            f"{self.f1_share:.0%} are F1 (retrieval miss), "
-            f"{1 - self.f1_share:.0%} are F_GEN (generation failure)."
-        )
 
 
 def summarize(evaluations: list[QueryEvaluation]) -> DiagnosticsSummary:

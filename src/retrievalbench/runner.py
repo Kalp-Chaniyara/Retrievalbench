@@ -168,7 +168,7 @@ async def run_experiment(
             else:
                 reranked = None
                 context = retrieved[: config.top_k_final]
-            answer = await generator.generate(item.query, context)
+            answer, cost_usd = await generator.generate(item.query, context)
             latency_ms = (time.perf_counter() - started) * 1000
 
             scores = await scorer.evaluate_query(
@@ -182,6 +182,7 @@ async def run_experiment(
                     reranked=reranked,
                     answer=answer,
                     latency_ms=latency_ms,
+                    cost_usd=cost_usd,
                 )
             )
             evaluations.append(QueryEvaluation(golden_item_id=item.id, scores=scores))

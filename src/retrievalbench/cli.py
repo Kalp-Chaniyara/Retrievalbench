@@ -21,14 +21,19 @@ from retrievalbench.ingest.chunkers import build_chunker
 from retrievalbench.ingest.index import CORPORA_DIR
 from retrievalbench.ingest.loader import load_corpus
 from retrievalbench.model import (
+    Budget,
     Chunk,
+    ConfigCandidate,
     ExperimentRun,
     FailureMode,
     GoldenItem,
     QueryEvaluation,
     QueryResult,
+    Recommendation,
     RetrievedChunk,
 )
+from retrievalbench.recommend import ComparabilityError
+from retrievalbench.recommend import recommend as compute_recommendation
 from retrievalbench.runner import run_experiment
 from retrievalbench.storage import GoldenStore, RunStore
 
@@ -451,6 +456,145 @@ def compare(
         _print_available_runs(store)
         raise typer.Exit(code=1)
     _render_compare(a, b)
+
+
+def _candidate_row(c: ConfigCandidate, rec: Recommendation) -> list[str]:
+    marks = []
+    if rec.winner is not None and c.run_id == rec.winner.run_id:
+        marks.append("[bold green]★[/bold green]")
+    if rec.reference is not None and c.run_id == rec.reference.run_id:
+        marks.append("[dim]$[/dim]")
+    if c.config_name in rec.dominated:
+        marks.append("[dim red]✗[/dim red]")
+    return [
+        " ".join(marks),
+        c.config_name,
+        f"{c.pass_rate:.0%} ({c.passed}/{c.total_queries})",
+        str(c.f1_count),
+        str(c.f_gen_count),
+        f"{c.mean_latency_ms:.0f} ms",
+        f"${c.cost_per_run_usd:.4f}",
+    ]
+
+
+def _render_recommendation(rec: Recommendation) -> None:
+    table = Table(
+        title=f"{rec.corpus_id} — {len(rec.candidates)} config(s) · "
+        f"{rec.golden_set_size} golden items"
+    )
+    table.add_column("")
+    table.add_column("config", style="cyan")
+    table.add_column("pass rate", justify="right")
+    table.add_column("F1", justify="right")
+    table.add_column("F_GEN", justify="right")
+    table.add_column("latency", justify="right")
+    table.add_column("cost/run", justify="right")
+    for c in rec.candidates:
+        table.add_row(*_candidate_row(c, rec))
+    console.print()
+    console.print(table)
+    console.print(
+        "[dim]★ recommended · $ cheapest (reference) · ✗ Pareto-dominated[/dim]"
+    )
+
+    if rec.infeasible:
+        over = Table(title="over budget (excluded)", style="dim")
+        over.add_column("config")
+        over.add_column("latency", justify="right")
+        over.add_column("cost/run", justify="right")
+        for c in rec.infeasible:
+            over.add_row(
+                c.config_name,
+                f"{c.mean_latency_ms:.0f} ms",
+                f"${c.cost_per_run_usd:.4f}",
+            )
+        console.print()
+        console.print(over)
+
+    if rec.winner is None:
+        for note in rec.notes:
+            console.print(f"[yellow]{note}[/yellow]")
+        return
+
+    body = Table.grid(padding=(0, 1))
+    body.add_row(
+        f"[bold green]RECOMMENDED[/bold green] [cyan]{rec.winner.config_name}[/cyan]"
+    )
+    if rec.quality_gain_points is not None and rec.reference is not None:
+        # Quality in POINTS, cost/latency as ratios — mixing the two units is how
+        # a modest gain gets dressed up as a big percentage.
+        cost = f"{rec.cost_ratio:.2f}×" if rec.cost_ratio else "n/a"
+        lat = f"{rec.latency_ratio:.2f}×" if rec.latency_ratio else "n/a"
+        body.add_row(
+            f"[dim]vs {rec.reference.config_name} (cheapest):[/dim] "
+            f"[bold]{rec.quality_gain_points:+.0f} points[/bold] pass rate · "
+            f"{cost} cost · {lat} latency"
+        )
+        if rec.diminishing_returns:
+            body.add_row(
+                "[yellow]⚠ Diminishing returns:[/yellow] "
+                f"only {rec.quality_gain_points:+.0f} points for that extra spend — "
+                f"[bold]ship {rec.reference.config_name} instead.[/bold]"
+            )
+    console.print()
+    console.print(Panel(body, border_style="green"))
+
+    if rec.notes:
+        notes = Table.grid(padding=(0, 1))
+        for note in rec.notes:
+            notes.add_row(f"• {note}")
+        console.print(
+            Panel(notes, title="Diagnosis → next step", border_style="magenta")
+        )
+
+    caveats: list[str] = []
+    # A gain smaller than one query is unmeasurable on this golden set.
+    if (
+        rec.quality_gain_points is not None
+        and abs(rec.quality_gain_points) < rec.resolution_points
+    ):
+        caveats.append(
+            f"The {rec.quality_gain_points:+.0f}-point gap is smaller than this "
+            f"golden set can resolve (1 query = {rec.resolution_points:.0f} points, "
+            f"n={rec.golden_set_size}). Treat it as noise; grow the golden set."
+        )
+    if len(rec.confounded_dimensions) > 1:
+        caveats.append(
+            f"{rec.winner.config_name} differs from {rec.reference.config_name} in "
+            f"{len(rec.confounded_dimensions)} dimensions "
+            f"({', '.join(rec.confounded_dimensions)}) — the gain cannot be "
+            f"attributed to any single change."
+        )
+    if caveats:
+        caveat_grid = Table.grid(padding=(0, 1))
+        for caveat in caveats:
+            caveat_grid.add_row(f"• {caveat}")
+        console.print(Panel(caveat_grid, title="⚠ Caveats", border_style="yellow"))
+
+
+@app.command()
+def recommend(
+    max_latency_ms: float = typer.Option(
+        None, "--max-latency-ms", help="Drop configs slower than this."
+    ),
+    max_cost_usd: float = typer.Option(
+        None, "--max-cost-usd", help="Drop configs costlier than this per run."
+    ),
+) -> None:
+    """Recommend a config across quality/cost/latency from the saved runs.
+
+    Read-only — it never executes a run, so `rbench run` each config first.
+    """
+    store = RunStore()
+    runs = [r for rid, _, _ in store.list_runs() if (r := store.get_run(rid))]
+    try:
+        rec = compute_recommendation(
+            runs, Budget(max_latency_ms=max_latency_ms, max_cost_usd=max_cost_usd)
+        )
+    except ComparabilityError as exc:
+        console.print(f"[red]cannot recommend:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    _render_recommendation(rec)
 
 
 if __name__ == "__main__":

@@ -90,7 +90,13 @@ class QueryResult(BaseModel):
     reranked: list[RetrievedChunk] | None = None
     answer: str
     latency_ms: float = 0.0
-    cost_usd: float = 0.0  # 0 until the generator returns token usage
+    # PIPELINE cost only — the generation call for this query, priced from the
+    # response's token usage. Deliberately excludes the judge/diagnostics spend:
+    # that is measurement overhead you don't pay in production, so folding it in
+    # would make a pipeline look pricier just for switching judge models.
+    # Also excludes indexing (one-time, amortized) and the local reranker (no $,
+    # but its real cost — latency — is already in latency_ms).
+    cost_usd: float = 0.0
 
 
 class QueryEvaluation(BaseModel):
@@ -113,3 +119,97 @@ class ExperimentRun(BaseModel):
     evaluations: list[QueryEvaluation]
     aggregate: dict[str, float]  # mean metrics / totals — what `compare` reads
     created_at: datetime
+
+
+class DiagnosticsSummary(BaseModel):
+    """Aggregate over one run's failures — what `rbench report` prints.
+    Computed by eval/diagnostics.summarize()."""
+
+    total_queries: int
+    failed_count: int
+    f1_count: int
+    f_gen_count: int
+
+    @property
+    def f1_share(self) -> float:
+        """Share of FAILED queries (not all queries) attributed to F1."""
+        return self.f1_count / self.failed_count if self.failed_count else 0.0
+
+    @property
+    def headline(self) -> str:
+        if self.failed_count == 0:
+            return f"0/{self.total_queries} queries failed."
+        return (
+            f"{self.failed_count}/{self.total_queries} queries failed — "
+            f"{self.f1_share:.0%} are F1 (retrieval miss), "
+            f"{1 - self.f1_share:.0%} are F_GEN (generation failure)."
+        )
+
+
+class Budget(BaseModel):
+    """Constraints a config must satisfy to be recommendable. Both optional —
+    an empty Budget means "rank everything, exclude nothing"."""
+
+    max_latency_ms: float | None = Field(default=None, gt=0)
+    max_cost_usd: float | None = Field(default=None, gt=0)
+
+    def allows(self, candidate: "ConfigCandidate") -> bool:
+        if self.max_latency_ms is not None and (
+            candidate.mean_latency_ms > self.max_latency_ms
+        ):
+            return False
+        if self.max_cost_usd is not None and (
+            candidate.cost_per_run_usd > self.max_cost_usd
+        ):
+            return False
+        return True
+
+
+class ConfigCandidate(BaseModel):
+    """One config's measured result, rolled up to the axes we rank on."""
+
+    run_id: str
+    config_name: str
+    config: RetrievalConfig
+    total_queries: int
+    passed: int
+    f1_count: int
+    f_gen_count: int
+    mean_latency_ms: float
+    cost_per_run_usd: float
+    faithfulness: float  # secondary colour only — never the ranking key
+
+    @property
+    def pass_rate(self) -> float:
+        """0..1. The ranking key: correctness, not metric means."""
+        return self.passed / self.total_queries if self.total_queries else 0.0
+
+    @property
+    def failed(self) -> int:
+        return self.f1_count + self.f_gen_count
+
+
+class Recommendation(BaseModel):
+    """What `rbench recommend` renders. Pure data — the CLI does the printing."""
+
+    corpus_id: str
+    golden_set_size: int
+    candidates: list[ConfigCandidate]  # ranked best-first (feasible only)
+    infeasible: list[ConfigCandidate] = Field(default_factory=list)
+    winner: ConfigCandidate | None = None
+    reference: ConfigCandidate | None = None  # cheapest feasible = "do nothing"
+    dominated: list[str] = Field(default_factory=list)
+    # Winner vs reference. Quality in POINTS (a 50%->83% move is +33 points, not
+    # +66%); cost/latency as ratios, where a multiplier is the honest unit.
+    quality_gain_points: float | None = None
+    cost_ratio: float | None = None
+    latency_ratio: float | None = None
+    diminishing_returns: bool = False
+    confounded_dimensions: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+    @property
+    def resolution_points(self) -> float:
+        """Smallest pass-rate change the golden set can even express. With n=4
+        one query flipping is 25 points, so any smaller 'gain' is noise."""
+        return 100.0 / self.golden_set_size if self.golden_set_size else 0.0
