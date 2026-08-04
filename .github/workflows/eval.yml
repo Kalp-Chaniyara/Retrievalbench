@@ -1,0 +1,117 @@
+# Tier 2 — the eval gate. Costs real money, so it NEVER runs automatically.
+#
+# Triggers, both deliberate:
+#   * add the `run-eval` label to a PR
+#   * click "Run workflow" in the Actions tab (and pick a config)
+#
+# There is intentionally no `push` trigger — you do not want every commit to
+# main spending OpenAI credits.
+#
+# NOTE ON SCOPE: with a 3-item golden set this is a SMOKE TEST, not a quality
+# gate. It proves the pipeline runs end-to-end and that cost accounting is
+# alive. Detecting a real quality regression needs ~20-30 golden items; below
+# that, one query flipping swamps any true signal (see check_baseline.py).
+name: Eval
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      config:
+        description: Config to evaluate
+        default: configs/baseline.yaml
+        type: choice
+        options:
+          - configs/baseline.yaml
+          - configs/hybrid_reranked.yaml
+          - configs/recursive_800.yaml
+      record_baseline:
+        description: Overwrite the baseline with this run's numbers
+        type: boolean
+        default: false
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    # Skips instantly (costing nothing) unless it was explicitly asked for.
+    # Fork PRs receive no secrets, so they could never run this anyway.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'run-eval')
+    runs-on: ubuntu-latest
+
+    # Qdrant as a sidecar container, reachable on localhost:6333 exactly as on
+    # your Mac — so no code needs a CI-specific branch.
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+      DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE: "90"
+      CONFIG: ${{ inputs.config || 'configs/baseline.yaml' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Fail fast — Tier 1 checks before spending money
+        run: uv run pytest tests/ -q
+
+      - name: Fail early if the API key is missing
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY secret is not set (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+
+      # data/corpora/sample_data1/ is committed (see .gitignore), so the corpus
+      # arrives with the checkout — no staging step, and CI evaluates the exact
+      # documents the golden set was written against.
+      - name: Show the corpus
+        run: ls -la data/corpora/sample_data1/
+
+      - name: Wait for Qdrant
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:6333/readyz && exit 0
+            sleep 2
+          done
+          echo "::error::Qdrant did not become ready"; exit 1
+
+      - name: Run the golden set
+        run: uv run rbench run --config "$CONFIG"
+
+      - name: Show the diagnosis
+        run: uv run rbench recommend || true
+
+      - name: Compare against the baseline
+        run: |
+          NAME=$(uv run python -c "from retrievalbench.config import load_config; print(load_config('$CONFIG').name)")
+          if [ "${{ inputs.record_baseline }}" = "true" ]; then
+            uv run python scripts/check_baseline.py --config-name "$NAME" --record
+          else
+            uv run python scripts/check_baseline.py --config-name "$NAME"
+          fi
+
+      - name: Upload the run database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-run-db
+          path: data/retrievalbench.db
+          if-no-files-found: warn

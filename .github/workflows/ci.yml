@@ -1,0 +1,74 @@
+# Tier 1 — runs on EVERY pull request. Free, fast (~40s), no API keys, no flake.
+#
+# It gates the DETERMINISTIC half of the project: the F1 snippet hit-test, the
+# F1->F_GEN cascade, the recommendation ranking policy, config validation and
+# cost arithmetic. Nothing here calls OpenAI or Qdrant, so it can never cost
+# money or fail because a judge model was moody.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch: # a "Run workflow" button, for re-running without pushing
+
+# A newer push to the same PR cancels the older run instead of queueing both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Without this the runner has an EMPTY folder — it does not clone for you.
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --frozen: install exactly what uv.lock pins. Fails if the lock file is
+      # stale, which catches "works on my machine because I never committed the
+      # dependency I added".
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Lint
+        run: uv run ruff check src/ tests/
+
+      - name: Format check
+        run: uv run ruff format --check src/ tests/
+
+      - name: Type check
+        run: uv run mypy src/retrievalbench/recommend.py src/retrievalbench/generate.py
+
+      # Any failing test exits non-zero, which fails the job. That IS the gate.
+      - name: Tests
+        run: uv run pytest tests/ -v
+
+  # Advisory only: tells you when a PR touches code that can change model output,
+  # so nobody has to memorise which paths those are. Never fails the build —
+  # spending money stays a human decision (add the `run-eval` label).
+  eval-reminder:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history to diff against the base branch
+
+      - name: Check whether quality-affecting paths changed
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"; echo "$CHANGED"
+          # These can change the ANSWERS. cli.py/recommend.py/storage.py cannot.
+          RISKY=$(echo "$CHANGED" | grep -E \
+            'src/retrievalbench/(generate|golden|runner)\.py|src/retrievalbench/(retrieval|eval)/|src/retrievalbench/ingest/chunkers\.py|configs/' \
+            || true)
+          if [ -n "$RISKY" ]; then
+            echo "::warning::This PR changes files that can alter model output:"
+            echo "$RISKY" | while read -r f; do echo "::warning::  $f"; done
+            echo "::warning::Consider adding the 'run-eval' label to run the Tier-2 eval before merging."
+          else
+            echo "No quality-affecting paths changed — Tier 1 is sufficient."
+          fi

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Protocol
 
 from openai import AsyncOpenAI
@@ -86,11 +87,16 @@ class OpenAIGenerator:
 
 # temperature is deliberately not threaded through config (G4: stays at 0).
 # Only `model` varies per experiment.
-_GENERATORS: dict[str, type[Generator]] = {
+#
+# Typed as Callable, not `type[Generator]`: a Protocol describes instances, so
+# `type[Generator]` promises nothing about the CONSTRUCTOR and mypy rejects
+# `cls(model=...)`. Callable[[str], Generator] states what the registry actually
+# holds — something you call with a model name to get a Generator.
+_GENERATORS: dict[str, Callable[[str], Generator]] = {
     "openai": OpenAIGenerator,
 }
 
 
 def build_generator(cfg: GenerationConfig) -> Generator:
-    cls = _GENERATORS[cfg.type]
-    return cls(model=cfg.model)
+    factory = _GENERATORS[cfg.type]
+    return factory(cfg.model)
