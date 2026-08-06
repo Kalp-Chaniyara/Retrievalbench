@@ -43,6 +43,9 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'run-eval')
     runs-on: ubuntu-latest
+    # Indexing ~24k chunks plus a TPM-bound judge run is ~25-40 min. Cap it so a
+    # stall cannot burn the whole runner budget.
+    timeout-minutes: 90
 
     # Qdrant as a sidecar container, reachable on localhost:6333 exactly as on
     # your Mac — so no code needs a CI-specific branch.
@@ -79,11 +82,24 @@ jobs:
             exit 1
           fi
 
-      # data/corpora/sample_data1/ is committed (see .gitignore), so the corpus
-      # arrives with the checkout — no staging step, and CI evaluates the exact
-      # documents the golden set was written against.
-      - name: Show the corpus
-        run: ls -la data/corpora/sample_data1/
+      # Corpora are committed (see .gitignore), so the corpus arrives with the
+      # checkout and CI evaluates the exact documents the golden set was written
+      # against. The path is DERIVED from cli.CORPUS_ID rather than hardcoded —
+      # it was pinned to sample_data1 and went stale the moment the active
+      # corpus changed, which a hardcoded path will always eventually do.
+      - name: Verify the corpus is present
+        run: |
+          CORPUS=$(uv run python -c "from retrievalbench.cli import CORPUS_ID; print(CORPUS_ID)")
+          DIR="data/corpora/$CORPUS"
+          echo "active corpus: $CORPUS"
+          if [ ! -d "$DIR" ]; then
+            echo "::error::$DIR is missing. cli.CORPUS_ID points at a corpus that is not committed."
+            exit 1
+          fi
+          echo "documents: $(find "$DIR" -type f | wc -l)"
+          # k/N per config: if k >= N every query retrieves the whole corpus and
+          # F1 cannot fire, which makes the whole eval meaningless.
+          uv run python scripts/corpus_stats.py "$CORPUS"
 
       - name: Wait for Qdrant
         run: |
