@@ -25,41 +25,28 @@ from retrievalbench.golden import (
 from .conftest import make_chunk, make_golden, make_retrieved
 
 
-def test_every_golden_snippet_exists_verbatim_in_its_corpus(corpora_root: Path) -> None:
-    """Guards ground truth, per corpus. A snippet matching nothing is a silent
-    hole: chunk_matches_snippets is ANY-of, so a typo'd snippet lets the item
-    keep passing on its siblings while testing less than you think."""
-    missing = []
-    for corpus_id, items in GOLDEN_SET.items():
-        corpus_dir = corpora_root / corpus_id
-        if not items:
-            continue
-        assert corpus_dir.is_dir(), f"{corpus_id} has golden items but no corpus"
-        text = " \n ".join(
-            _normalize(p.read_text(encoding="utf-8"))
-            for p in corpus_dir.rglob("*")
-            if p.suffix in {".md", ".txt", ".rst"}
-        )
-        missing += [
-            (corpus_id, item.id, snippet)
-            for item in items
-            for snippet in item.expected_snippets
-            if _normalize(snippet) not in text
-        ]
-    assert not missing, f"golden snippets absent from their corpus: {missing}"
+def test_every_golden_snippet_exists_verbatim_in_the_corpus(corpus_dir: Path) -> None:
+    """Guards ground truth. A snippet that matches nothing is a silent hole."""
+    corpus = " \n ".join(_normalize(p.read_text()) for p in corpus_dir.glob("*.md"))
+    missing = [
+        (item.id, snippet)
+        for item in GOLDEN_SET
+        for snippet in item.expected_snippets
+        if _normalize(snippet) not in corpus
+    ]
+    assert not missing, f"golden snippets not found in the corpus: {missing}"
 
 
-def test_golden_ids_are_unique_within_and_across_corpora() -> None:
-    ids = [item.id for items in GOLDEN_SET.values() for item in items]
+def test_golden_ids_are_unique() -> None:
+    ids = [item.id for item in GOLDEN_SET]
     assert len(ids) == len(set(ids))
 
 
 def test_golden_items_have_snippets_and_answers() -> None:
-    for corpus_id, items in GOLDEN_SET.items():
-        for item in items:
-            assert item.expected_snippets, f"{corpus_id}/{item.id}: no snippets"
-            assert item.expected_answer.strip(), f"{corpus_id}/{item.id}: no answer"
-            assert item.query.strip(), f"{corpus_id}/{item.id}: no query"
+    for item in GOLDEN_SET:
+        assert item.expected_snippets, f"{item.id} has no expected_snippets"
+        assert item.expected_answer.strip(), f"{item.id} has no expected_answer"
+        assert item.query.strip(), f"{item.id} has no query"
 
 
 @pytest.mark.parametrize(
@@ -112,4 +99,4 @@ def test_generated_items_get_a_gen_prefixed_id() -> None:
         GeneratedCandidate(question="q", expected_answer="a", expected_snippets=["s"])
     )
     assert item.id.startswith("gen_")
-    assert item.id not in {g.id for v in GOLDEN_SET.values() for g in v}
+    assert item.id not in {g.id for g in GOLDEN_SET}

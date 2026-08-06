@@ -1,3 +1,5 @@
+import asyncio
+
 from deepeval.metrics import GEval
 from deepeval.models.base_model import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase, SingleTurnParams
@@ -168,20 +170,19 @@ async def diagnose_run(
     result_by_id = {r.golden_item_id: r for r in query_results}
     client = AsyncOpenAI()
 
-    # Sequential, NOT asyncio.gather — same reason as eval/metric.py:Scorer.
-    # Gathering every query fired all N correctness triggers at once and blew
-    # the judge's 30k TPM cap, killing the run with a RetryError. TPM is the
-    # ceiling, so serializing costs no wall time and removes the burst.
-    diagnoses = [
-        await diagnose_query(
-            client,
-            note_model,
-            judge_model,
-            golden_by_id[evaluation.golden_item_id],
-            result_by_id[evaluation.golden_item_id],
+    # Independent per-query judge calls -> run them concurrently, not in a loop.
+    diagnoses = await asyncio.gather(
+        *(
+            diagnose_query(
+                client,
+                note_model,
+                judge_model,
+                golden_by_id[evaluation.golden_item_id],
+                result_by_id[evaluation.golden_item_id],
+            )
+            for evaluation in evaluations
         )
-        for evaluation in evaluations
-    ]
+    )
 
     updated = [
         evaluation.model_copy(

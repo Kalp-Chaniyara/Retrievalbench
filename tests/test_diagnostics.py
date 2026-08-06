@@ -6,7 +6,6 @@ CI for free. The correctness trigger (`is_failed`) is a judge call and is
 therefore NOT tested here; it belongs to the Tier-2 eval.
 """
 
-from retrievalbench.cli import failures_by_query_type
 from retrievalbench.eval.diagnostics import classify_failure, summarize
 from retrievalbench.model import EvalScores, FailureMode, QueryEvaluation, QueryResult
 
@@ -102,52 +101,3 @@ def test_summary_with_no_failures_does_not_divide_by_zero() -> None:
     summary = summarize([_ev(FailureMode.NONE)])
     assert summary.f1_share == 0.0
     assert summary.headline == "0/1 queries failed."
-
-
-def _ev_for(item_id: str, mode: FailureMode) -> QueryEvaluation:
-    return QueryEvaluation(
-        golden_item_id=item_id,
-        scores=EvalScores(
-            faithfulness=score(1.0),
-            answer_relevancy=score(1.0),
-            context_precision=score(1.0),
-            context_recall=score(1.0),
-        ),
-        failure_mode=mode,
-    )
-
-
-def test_failures_split_by_query_type() -> None:
-    """The finding: F1 concentrated in exact_match, absent from semantic. A
-    single aggregate F1 rate would average that signal away."""
-    golden = {
-        "a": make_golden("s", item_id="a"),
-        "b": make_golden("s", item_id="b"),
-        "c": make_golden("s", item_id="c"),
-    }
-    golden["a"].query_type = "exact_match"
-    golden["b"].query_type = "exact_match"
-    golden["c"].query_type = "semantic"
-
-    breakdown = failures_by_query_type(
-        [
-            _ev_for("a", FailureMode.RETRIEVAL_MISS),
-            _ev_for("b", FailureMode.NONE),
-            _ev_for("c", FailureMode.NONE),
-        ],
-        golden,
-    )
-    assert breakdown["exact_match"][FailureMode.RETRIEVAL_MISS] == 1
-    assert breakdown["exact_match"][FailureMode.NONE] == 1
-    assert breakdown["semantic"][FailureMode.RETRIEVAL_MISS] == 0
-    assert breakdown["semantic"][FailureMode.NONE] == 1
-
-
-def test_breakdown_skips_evaluations_with_no_matching_golden_item() -> None:
-    """A run scored against a golden set that has since changed must not crash
-    or invent a type."""
-    assert failures_by_query_type([_ev_for("gone", FailureMode.NONE)], {}) == {}
-
-
-def test_golden_item_query_type_defaults_to_semantic() -> None:
-    assert make_golden("s").query_type == "semantic"

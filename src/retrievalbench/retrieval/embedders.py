@@ -7,16 +7,6 @@ from qdrant_client import models
 
 from retrievalbench.config import EmbeddingConfig, SparseEmbeddingConfig
 
-# Texts per embeddings request. OpenAI's cap is 300k TOKENS per request, so
-# this is a count that stays under it for any realistic chunk size
-# (128 x 2000 tokens = 256k). ponytail: fixed count; switch to token-aware
-# batching only if chunking ever exceeds ~2k tokens per chunk.
-EMBED_BATCH_SIZE = 128
-
-
-def _batches(items: list[str], size: int) -> list[list[str]]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
-
 
 class Embedder(Protocol):
     name: str
@@ -37,17 +27,12 @@ class OpenAITextEmbedderSmall:
         self.client = AsyncOpenAI()
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        # One request per BATCH, never one per text (async hygiene) — but also
-        # never one request for everything: OpenAI caps a single embeddings call
-        # at 300k tokens, and a 24k-chunk corpus is ~5.1M. Batches run
-        # sequentially so a full re-index doesn't burst into rate limits.
-        vectors: list[list[float]] = []
-        for batch in _batches(texts, EMBED_BATCH_SIZE):
-            response = await self.client.embeddings.create(
-                model="text-embedding-3-small", input=batch
-            )
-            vectors.extend(embd.embedding for embd in response.data)
-        return vectors
+
+        response = await self.client.embeddings.create(
+            model="text-embedding-3-small", input=texts
+        )
+
+        return [embd.embedding for embd in response.data]
 
 
 # Only one embedder today; the registry still makes it config-swappable and

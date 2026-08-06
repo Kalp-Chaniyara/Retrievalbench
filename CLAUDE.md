@@ -26,37 +26,20 @@ Phase 2 code is **all built** (every BUILD item, Roadmap §5):
 4. `golden.py`: LLM golden generator (structured output; every snippet validated verbatim against its source chunk before review) + `rbench gen-golden` keep/edit/drop review. Kept items persist to `GoldenStore` (SQLite) and merge with the hand-written `GOLDEN_SET` at read time.
 5. `cli.py`: commands are `run`, `report`, `gen-golden`, `compare`, `recommend`.
 
-**Phase 2 DONE-CHECK: MET.** On the `techdocs` corpus (733 PEPs, 26 golden
-items) F1 fires and dense→hybrid measurably reduces it (8 → 3). Numbers, the
-per-query-type breakdown, and the caveats live in `evals/RESULTS.md` — read it
-before quoting any figure. Machine-readable baselines in `evals/baseline.json`.
+**Phase 2 is STILL NOT signed off — the DONE-CHECK is unmet (fix before new Phase 3 features):**
+- **F1 has never fired — not once, across all 6 saved runs.** Every evaluation is `none` or `f_gen`. The retrieval-miss branch, which is *the wedge*, is entirely unexercised on real data: `hit_chunk_ids` has never returned empty. A two-class engine that only ever emits one class is unvalidated.
+- **dense→hybrid shows no measurable effect.** `hybrid_reranked` has now been run, but it scores an identical 75% (3/4) to `fixed_512` and is Pareto-dominated (1.7× the latency, no quality gain). The DONE-CHECK — *"switching dense→hybrid measurably reduces F1"* — cannot be met while F1 is 0 in both.
+- **Root cause of both: the golden set is 4 items on an easy 6-doc corpus.** At n=4 the pass-rate resolution is 25 points, so nothing smaller is even detectable. Fix by growing the golden set and adding **keyword/exact-match queries dense retrieval should miss** — that is what makes F1 fire *and* what makes hybrid win, so it closes both gaps at once.
+- **All saved runs report `$0.0000`** — they predate cost accounting. Re-run every config to populate real costs before trusting `recommend`'s cost axis.
 
-**Root cause of the old "F1 never fires":** `k/N` was 143-385% — retrieval
-asked for more chunks than existed, so every query returned the whole corpus
-and `hit_chunk_ids` could never be empty. F1 was arithmetically impossible, not
-merely rare. `scripts/corpus_stats.py` prints this ratio per config; run it
-before trusting any retrieval result on a new corpus.
-
-**The comparison is confounded** — `hybrid_reranked` differs from `fixed_512`
-in 8 dimensions, so the defensible claim is "this bundle reduces F1", not
-"hybrid reduces F1". `recommend`'s `config_diff` prints the caveat.
-
-Phase 3 status:
-1. `recommend.py` — BUILT. Quality = correctness PASS RATE (`failure_mode ==
-   NONE`), never the mean of the four metrics: faithfulness returns a hardcoded
-   `1` when the answer has zero claims, so an "I don't know" pipeline would win
-   on three of four axes. Faithfulness is a tie-break only. Quality in
-   percentage POINTS, cost/latency as ratios. Cost is pipeline-only.
-2. DeepEval **CI gate** — BUILT. Two tiers, PR-only (`ci.yml` every PR;
-   `eval.yml` on the `run-eval` label or manual dispatch).
-3. `QueryRewriteRetriever` / `MultiQueryRetriever`, the F2/F3 split, the UI and
-   PyPI packaging are **CUT** — permanently, not deferred. Do not add them.
-4. Bounded-semaphore concurrency (Design §5.8 `[V3]`) was **measured and
-   rejected**: the eval loop is token-bound (10s CPU across 18 min wall clock,
-   `gpt-4o` capped at 30k TPM), not latency-bound. Parallelism reaches the rate
-   limit sooner without finishing earlier. Judge calls in `eval/metric.py` and
-   `eval/diagnostics.py` are deliberately SEQUENTIAL — do not "optimise" them
-   back to `asyncio.gather`.
+Phase 3 targets (Roadmap §6), in order:
+1. ~~`recommend.py`~~ **BUILT.** `rbench recommend` ranks measured configs on quality/cost/latency with Pareto domination, a diminishing-returns callout, and confound + resolution caveats. Two rules it encodes, both load-bearing:
+   - **Quality = correctness PASS RATE** (`failure_mode == NONE`), never the mean of the four metrics. Ranking on metric means makes a pipeline that answers "I don't know" everywhere the *winner* — faithfulness returns a hardcoded `1` when the answer has zero claims, and context_precision/recall never see the answer at all. Faithfulness is a tie-break only. This is why the recommender **depends on** the diagnostics engine: no `failure_mode` → no trustworthy pass rate.
+   - **Quality in percentage POINTS, cost/latency as ratios.** 50%→83% is `+33 points`, not "+66%".
+   - Cost is **pipeline-only** (generation tokens). Priced in `generate._PRICE_PER_1M`; an unpriced model raises at construction so a run can never silently report $0.00.
+2. `retrieval/retrieval.py`: `QueryRewriteRetriever`, `MultiQueryRetriever`.
+3. DeepEval **CI gate**: GitHub Action runs the golden set per PR, fails on metric regression.
+4. *(Optional, only after the CI gate is green)* the F2/F3 split (§5.10.1).
 
 **We talk to `AsyncOpenAI` directly** via `chat.completions.create`. (An earlier plan to route it through a separate LLM-wrapper library has been dropped — ignore any reference to that.)
 
@@ -83,12 +66,6 @@ Phase 3 status:
 - **Golden ground truth is verbatim source *snippets*, not chunk ids** (`GoldenItem.expected_snippets`). A chunk's `docid_NNNN` id encodes *position*, which shifts with chunk size — so it can't be ground truth for a benchmark that varies chunking. Snippets are config-stable source text; a chunk is a retrieval **hit** if it contains a snippet after whitespace/case normalization, resolved per config via `golden.chunk_matches_snippets` / `hit_chunk_ids` (source docs hard-wrap, so normalize both sides). This is the **F1 (retrieval-miss) gate**, and F_GEN is whatever survives it (the deferred F2/F3 split would gate on it too). It reads `QueryResult.retrieved` — the full pre-rerank `top_k_retrieve` shortlist — because F1 asks whether the evidence ever reached the pipeline at all, not whether reranking happened to keep it. Keep snippets short + distinctive so a chunk boundary can't split the match.
 - **Metrics ≠ correctness — and LLM-judge scores are noisy.** DeepEval `faithfulness` measures grounding of the answer's claims against the *retrieved context* (a hallucination check), not correctness vs `expected_answer`; with few claims it's near-binary, so one bad judge verdict → 0.0. A weak judge (`gpt-4o-mini`) produces exactly these false contradictions. Trust the **aggregate mean across the golden set** (what `compare` reads), not any single-query number — and this is *why F1/F_GEN classification stays a deterministic rules engine, the LLM only writing the note.*
 - **Model split is deliberate — do not collapse it to one model.** The **judge is `gpt-4o`** (`runner.DEFAULT_JUDGE_MODEL`, `cli.JUDGE_MODEL`); **everything else is `gpt-4o-mini`** — the RAG generator (the system under test), the diagnostics note writer, the golden generator. Two reasons: (a) Design §5.9 — the judge must be stronger than / a different family from the generator, else it grades its own family too leniently and inflates every score; (b) `gpt-4o-mini`'s structured-output call in DeepEval's faithfulness **verdicts** step could fail to terminate on some inputs, hanging a run until the per-attempt timeout. Never "save cost" by moving the judge to mini, and never upgrade the generator to `gpt-4o` — the generator *is* the thing being measured, so changing it breaks comparability with every saved run.
-
-## Scale rules (bugs a tiny corpus hides — all three were latent for months)
-- **Never send an unbounded collection in one request.** `embed()` batches at `EMBED_BATCH_SIZE=128` (OpenAI caps a call at 300k tokens; 24k chunks is ~5.1M) and `upsert()` at `UPSERT_BATCH_SIZE=256` (24k points x 1536 floats is ~150MB; Qdrant drops the connection). "Batch your embeddings" was originally implemented as ONE batch and looked correct at 14 chunks.
-- **The eval loop is token-bound, not latency-bound.** `gpt-4o` is capped at 30k TPM; a 26-query run is ~18 min of mostly-idle waiting (10s CPU). Judge calls in `eval/metric.py` and `eval/diagnostics.py` are SEQUENTIAL on purpose — `asyncio.gather` bursts past the cap and kills the run with a `RetryError`. Do not reintroduce concurrency there.
-- **Check `k/N` before trusting any retrieval number.** `uv run python scripts/corpus_stats.py`. If `k >= N` every query retrieves the whole corpus and F1 cannot fire.
-- **Batched upserts make partial indexes possible.** `is_populated()` only checks `count > 0`, so a run killed mid-ingest leaves an incomplete index that the next run serves as a cache hit. If a run is interrupted, verify point counts against `corpus_stats.py` before trusting results.
 
 ## DeepEval specifics (already-hit gotchas — cost real debugging time)
 - **Scoring goes through `eval/metric.py:Scorer`, not bare metric calls.** `GPTModel._build_client()` constructs a **brand-new `AsyncOpenAI` + httpx connection pool on every LLM call** and never closes it — one query's scoring opened 12 separate TLS connections with zero reuse (verified with `lsof -a -p <pid> -i`). `Scorer` owns one pooled `httpx.AsyncClient`, passes it via `GPTModel(async_http_client=...)`, and exposes `.model` so the diagnostics correctness trigger reuses the same warm connections. `runner.py` builds it once and `aclose()`s it in a `finally`.
