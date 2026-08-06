@@ -79,9 +79,7 @@ def main() -> int:
         print("::error::total_cost_usd is 0 — cost accounting is broken")
         return 1
 
-    baselines = (
-        json.loads(BASELINE_PATH.read_text()) if BASELINE_PATH.exists() else {}
-    )
+    baselines = json.loads(BASELINE_PATH.read_text()) if BASELINE_PATH.exists() else {}
 
     if args.record:
         baselines[args.config_name] = current
