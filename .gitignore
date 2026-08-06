@@ -22,6 +22,7 @@ wheels/
 !/data/corpora/
 /data/corpora/*
 !/data/corpora/sample_data1/
+!/data/corpora/techdocs/
 
 /qdrant_storage
 
