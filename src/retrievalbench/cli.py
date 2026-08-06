@@ -1,7 +1,5 @@
 import asyncio
-from collections import Counter
 from collections.abc import Callable
-from typing import cast
 
 import typer
 from dotenv import load_dotenv
@@ -23,7 +21,6 @@ from retrievalbench.ingest.chunkers import build_chunker
 from retrievalbench.ingest.index import CORPORA_DIR
 from retrievalbench.ingest.loader import load_corpus
 from retrievalbench.model import (
-    QUERY_TYPES,
     Budget,
     Chunk,
     ConfigCandidate,
@@ -32,7 +29,6 @@ from retrievalbench.model import (
     GoldenItem,
     QueryEvaluation,
     QueryResult,
-    QueryType,
     Recommendation,
     RetrievedChunk,
 )
@@ -52,7 +48,7 @@ def main() -> None:
     """RetrievalBench: a config-driven retrieval-eval harness."""
 
 
-CORPUS_ID = "techdocs"  # folder under data/corpora/ + the index-cache key
+CORPUS_ID = "sample_data1"  # folder under data/corpora/ + the index-cache key
 # Judge only — see runner.DEFAULT_JUDGE_MODEL for why this one is not the mini.
 JUDGE_MODEL = "gpt-4o"
 
@@ -63,7 +59,7 @@ def _golden_set(corpus_id: str) -> list[GoldenItem]:
     human kept for this corpus (GoldenStore). Ids never collide — generated
     items are 'gen_'-prefixed — so this is a plain concatenation."""
     store = GoldenStore()
-    return GOLDEN_SET.get(corpus_id, []) + store.load_golden_set(corpus_id)
+    return GOLDEN_SET + store.load_golden_set(corpus_id)
 
 
 def _color_score(score: float) -> str:
@@ -223,49 +219,6 @@ def run(
     )
 
 
-def failures_by_query_type(
-    evaluations: list[QueryEvaluation], golden_by_id: dict[str, GoldenItem]
-) -> dict[str, Counter[FailureMode]]:
-    """Per-query-type failure counts — the actual finding of the whole exercise.
-
-    "F1 fires on 40% of exact_match and 0% of semantic" tells you dense
-    retrieval is missing keyword queries. A single aggregate F1 rate averages
-    that signal away. Items missing from `golden_by_id` (e.g. a run scored
-    against a golden set that has since changed) are skipped rather than
-    guessed at.
-    """
-    breakdown: dict[str, Counter[FailureMode]] = {}
-    for evaluation in evaluations:
-        item = golden_by_id.get(evaluation.golden_item_id)
-        if item is None:
-            continue
-        breakdown.setdefault(item.query_type, Counter())[evaluation.failure_mode] += 1
-    return breakdown
-
-
-def _render_query_type_table(breakdown: dict[str, Counter[FailureMode]]) -> Table:
-    table = Table(title="failures by query type")
-    table.add_column("query type", style="cyan")
-    table.add_column("n", justify="right")
-    table.add_column("PASS", justify="right")
-    table.add_column("F1", justify="right")
-    table.add_column("F_GEN", justify="right")
-    table.add_column("F1 rate", justify="right")
-    for query_type in sorted(breakdown):
-        counts = breakdown[query_type]
-        total = sum(counts.values())
-        f1 = counts[FailureMode.RETRIEVAL_MISS]
-        table.add_row(
-            query_type,
-            str(total),
-            str(counts[FailureMode.NONE]),
-            str(f1),
-            str(counts[FailureMode.GENERATION_FAILURE]),
-            f"{f1 / total:.0%}" if total else "—",
-        )
-    return table
-
-
 def _render_report(run: ExperimentRun) -> None:
     """Per-query failure table + aggregate headline — the diagnosis (design
     §5.10). Recomputed from `run.evaluations` rather than stored, since the
@@ -288,10 +241,6 @@ def _render_report(run: ExperimentRun) -> None:
     summary = summarize(run.evaluations)
     console.print()
     console.print(table)
-    console.print()
-    console.print(
-        _render_query_type_table(failures_by_query_type(run.evaluations, golden_by_id))
-    )
     console.print()
     console.print(Panel(summary.headline, border_style="magenta", title="Summary"))
 
@@ -346,26 +295,16 @@ def gen_golden(
     corpus_id: str = typer.Option(
         CORPUS_ID, "--corpus-id", help="Corpus to generate from."
     ),
-    n: int = typer.Option(10, "--n", help="Candidates to generate PER query type."),
+    n: int = typer.Option(
+        10, "--n", help="Number of chunks to sample and generate candidates from."
+    ),
     seed: int = typer.Option(42, "--seed", help="Sampling seed (reproducibility, G4)."),
     model: str = typer.Option(
         DEFAULT_GENERATOR_MODEL, "--model", help="Generator model."
     ),
-    query_types: str = typer.Option(
-        ",".join(QUERY_TYPES), "--types", help="Comma-separated query types."
-    ),
-    auto: bool = typer.Option(
-        False,
-        "--auto",
-        help="Keep every candidate without prompting (skips human review).",
-    ),
 ) -> None:
     """Generate candidate golden items from the corpus, review each one
-    (keep/edit/drop), and persist kept items to the corpus's stored golden set.
-
-    Generation is driven PER query type: the type is an input to the prompt, so
-    it is true by construction rather than inferred from the output.
-    """
+    (keep/edit/drop), and persist kept items to the corpus's stored golden set."""
     cfg = load_config(config)
     corpus_dir = CORPORA_DIR / corpus_id
     documents = load_corpus(str(corpus_dir))
@@ -375,54 +314,42 @@ def gen_golden(
         console.print(f"[red]no chunks found under {corpus_dir}[/red]")
         raise typer.Exit(code=1)
 
+    console.print(
+        f"[dim]generating up to {n} candidate(s) from {len(chunks)} chunks…[/dim]"
+    )
+    candidates = asyncio.run(generate_candidates(chunks, model=model, n=n, seed=seed))
+    console.print(
+        f"[dim]{len(candidates)}/{n} candidates passed verbatim validation[/dim]\n"
+    )
+
     kept: list[GoldenItem] = []
-    for raw_type in [t.strip() for t in query_types.split(",") if t.strip()]:
-        if raw_type not in QUERY_TYPES:
-            console.print(f"[red]unknown query type:[/red] {raw_type}")
-            raise typer.Exit(code=1)
-        qtype = cast(QueryType, raw_type)
-
-        console.print(f"[dim]generating {n} {qtype} candidate(s)…[/dim]")
-        candidates = asyncio.run(
-            generate_candidates(chunks, query_type=qtype, model=model, n=n, seed=seed)
+    for index, (chunk, candidate) in enumerate(candidates, start=1):
+        question, expected_answer = candidate.question, candidate.expected_answer
+        _render_candidate(
+            index,
+            len(candidates),
+            chunk,
+            question,
+            expected_answer,
+            candidate.expected_snippets,
         )
-        console.print(f"[dim]{len(candidates)}/{n} passed verbatim validation[/dim]\n")
 
-        for index, (group, candidate) in enumerate(candidates, start=1):
-            question, expected_answer = candidate.question, candidate.expected_answer
-            if not auto:
-                _render_candidate(
-                    index,
-                    len(candidates),
-                    group[0],
-                    question,
-                    expected_answer,
-                    candidate.expected_snippets,
-                )
-                choice = Prompt.ask(
-                    f"[{qtype}] [k]eep / [e]dit / [d]rop",
-                    choices=["k", "e", "d"],
-                    default="k",
-                )
-                if choice == "d":
-                    continue
-                if choice == "e":
-                    question = Prompt.ask("Question", default=question)
-                    expected_answer = Prompt.ask(
-                        "Expected answer", default=expected_answer
-                    )
+        choice = Prompt.ask(
+            "[k]eep / [e]dit / [d]rop", choices=["k", "e", "d"], default="k"
+        )
+        if choice == "d":
+            continue
+        if choice == "e":
+            question = Prompt.ask("Question", default=question)
+            expected_answer = Prompt.ask("Expected answer", default=expected_answer)
 
-            kept.append(
-                candidate_to_golden_item(
-                    candidate.model_copy(
-                        update={
-                            "question": question,
-                            "expected_answer": expected_answer,
-                        }
-                    ),
-                    query_type=qtype,
+        kept.append(
+            candidate_to_golden_item(
+                candidate.model_copy(
+                    update={"question": question, "expected_answer": expected_answer}
                 )
             )
+        )
 
     if not kept:
         console.print("\n[dim]no items kept.[/dim]")

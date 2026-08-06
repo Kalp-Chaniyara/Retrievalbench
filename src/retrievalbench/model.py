@@ -1,6 +1,5 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -32,12 +31,6 @@ class RetrievedChunk(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
-# One place defining the allowed query kinds — GoldenItem, golden.py and the
-# gen-golden review prompt all read from here so they cannot drift apart.
-QueryType = Literal["exact_match", "semantic", "negation", "multi_hop"]
-QUERY_TYPES: tuple[str, ...] = ("exact_match", "semantic", "negation", "multi_hop")
-
-
 class GoldenItem(BaseModel):
     id: str  # stable id so QueryResult/QueryEvaluation can link back here
     query: str
@@ -50,12 +43,6 @@ class GoldenItem(BaseModel):
     # This drives the F1 (retrieval-miss) gate; F2/F3 are gated on it.
     expected_snippets: list[str]
     expected_answer: str
-    # What KIND of retrieval this query stresses. The per-type F1 breakdown is
-    # the actual finding ("F1 fires on 40% of exact_match and 0% of semantic");
-    # a single aggregate F1 rate hides which retrieval mode is failing.
-    # Defaults to "semantic" so GoldenStore rows written before this field
-    # deserialize without a migration.
-    query_type: QueryType = "semantic"
 
 
 class MetricScore(BaseModel):

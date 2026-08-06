@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 from deepeval.metrics import (
     AnswerRelevancyMetric,
@@ -92,25 +94,21 @@ class Scorer:
             retrieval_context=[chunk.text for chunk in retrieved_chunks],
         )
 
-        # Sequential, NOT asyncio.gather — a deliberate reversal.
-        #
-        # These calls are independent, so concurrency looks right and was the
-        # original design. But the judge (gpt-4o) is capped at 30k TOKENS per
-        # minute, and each metric spends ~5k. Firing four at once bursts past
-        # the cap, tenacity exhausts its retries, and the whole run dies with a
-        # RetryError. Wall time is unchanged either way — TPM is the ceiling,
-        # not latency — so serializing costs nothing and removes the burst.
-        faith = await _measure(
-            FaithfulnessMetric(model=self.model, include_reason=True), test_case
-        )
-        relevancy = await _measure(
-            AnswerRelevancyMetric(model=self.model, include_reason=True), test_case
-        )
-        precision = await _measure(
-            ContextualPrecisionMetric(model=self.model, include_reason=True), test_case
-        )
-        recall = await _measure(
-            ContextualRecallMetric(model=self.model, include_reason=True), test_case
+        # Independent LLM-judge calls -> run them concurrently, not in a loop.
+        faith, relevancy, precision, recall = await asyncio.gather(
+            _measure(
+                FaithfulnessMetric(model=self.model, include_reason=True), test_case
+            ),
+            _measure(
+                AnswerRelevancyMetric(model=self.model, include_reason=True), test_case
+            ),
+            _measure(
+                ContextualPrecisionMetric(model=self.model, include_reason=True),
+                test_case,
+            ),
+            _measure(
+                ContextualRecallMetric(model=self.model, include_reason=True), test_case
+            ),
         )
 
         return EvalScores(

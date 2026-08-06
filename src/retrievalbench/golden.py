@@ -6,7 +6,7 @@ import uuid
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from retrievalbench.model import Chunk, GoldenItem, QueryType, RetrievedChunk
+from retrievalbench.model import Chunk, GoldenItem, RetrievedChunk
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -62,41 +62,6 @@ _GENERATOR_SYSTEM_PROMPT = (
     "appear in an unrelated passage."
 )
 
-# The query TYPE is an input, not something the model labels after the fact.
-# Asking for "an exact-match query" and getting one makes the type true by
-# construction; letting the model classify its own output would put noise into
-# the per-type F1 breakdown, which is the finding this whole exercise exists
-# to produce.
-#
-# exact_match is the load-bearing one: dense retrieval embeds meaning, so a
-# rare literal token (a PEP number, a version string, an error code) has weak
-# semantic signal and is exactly what a bi-encoder misses. Those are the
-# queries expected to produce F1 — and the ones hybrid/BM25 should rescue.
-_TYPE_GUIDANCE: dict[str, str] = {
-    "exact_match": (
-        "The question MUST hinge on a rare literal token that appears verbatim "
-        "in the passage — an identifier, number, version string, error code, "
-        "status field, date, or acronym. Use that exact token in the question. "
-        "Do not paraphrase it. A reader must need that precise string to answer."
-    ),
-    "semantic": (
-        "Ask a conceptual question about what the passage MEANS. Deliberately "
-        "avoid reusing the passage's distinctive wording — paraphrase, so the "
-        "question and the source share meaning but few literal tokens."
-    ),
-    "negation": (
-        "Ask a question whose correct answer is a denial, a limitation, or an "
-        "explicit absence stated in the passage (something rejected, deferred, "
-        "withdrawn, not supported, or disallowed). The expected answer must "
-        "say what is NOT the case."
-    ),
-    "multi_hop": (
-        "Two passages are given. Ask ONE question that cannot be answered from "
-        "either passage alone — it must require combining a fact from each. "
-        "Quote at least one verbatim phrase from EACH passage."
-    ),
-}
-
 
 class GeneratedCandidate(BaseModel):
     """Structured-output shape for one LLM-generated candidate, pre-review."""
@@ -125,29 +90,20 @@ def sample_chunks(chunks: list[Chunk], n: int, seed: int) -> list[Chunk]:
 
 
 async def _generate_candidate(
-    client: AsyncOpenAI, model: str, chunks: list[Chunk], query_type: QueryType
+    client: AsyncOpenAI, model: str, chunk: Chunk
 ) -> GeneratedCandidate | None:
-    # multi_hop gets two passages; every other type gets one. The verbatim
-    # check below runs against the concatenation either way.
-    passages = "\n\n---\n\n".join(
-        f"Passage {i}:\n{c.text}" for i, c in enumerate(chunks, start=1)
-    )
     response = await client.chat.completions.parse(
         model=model,
         temperature=0,
         messages=[
-            {
-                "role": "system",
-                "content": f"{_GENERATOR_SYSTEM_PROMPT}\n\n{_TYPE_GUIDANCE[query_type]}",
-            },
-            {"role": "user", "content": passages},
+            {"role": "system", "content": _GENERATOR_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Passage:\n{chunk.text}"},
         ],
         response_format=GeneratedCandidate,
     )
     candidate = response.choices[0].message.parsed
-    source = "\n".join(c.text for c in chunks)
     if candidate is None or not _all_snippets_verbatim(
-        source, candidate.expected_snippets
+        chunk.text, candidate.expected_snippets
     ):
         return None
     return candidate
@@ -156,103 +112,252 @@ async def _generate_candidate(
 async def generate_candidates(
     chunks: list[Chunk],
     *,
-    query_type: QueryType = "semantic",
     model: str = DEFAULT_GENERATOR_MODEL,
     n: int = 10,
     seed: int = 42,
-) -> list[tuple[list[Chunk], GeneratedCandidate]]:
-    """Sample chunks and generate `n` candidates of ONE query type, concurrently
+) -> list[tuple[Chunk, GeneratedCandidate]]:
+    """Sample `n` chunks and generate one candidate per chunk, concurrently
     (independent LLM calls -> asyncio.gather, not a loop). Returns only the
     candidates that passed verbatim validation, paired with their source
-    chunk(s) so the review step can show them.
-
-    multi_hop draws 2 chunks per item because a question answerable from a
-    single passage is not multi-hop by definition.
-    """
-    per_item = 2 if query_type == "multi_hop" else 1
-    sampled = sample_chunks(chunks, n * per_item, seed)
-    groups = [sampled[i : i + per_item] for i in range(0, len(sampled), per_item)]
-    groups = [g for g in groups if len(g) == per_item]
-
+    chunk so the CLI review step can show it."""
+    sampled = sample_chunks(chunks, n, seed)
     client = AsyncOpenAI()
     results = await asyncio.gather(
-        *(_generate_candidate(client, model, group, query_type) for group in groups)
+        *(_generate_candidate(client, model, chunk) for chunk in sampled)
     )
     return [
-        (group, candidate)
-        for group, candidate in zip(groups, results, strict=True)
+        (chunk, candidate)
+        for chunk, candidate in zip(sampled, results, strict=True)
         if candidate is not None
     ]
 
 
-def candidate_to_golden_item(
-    candidate: GeneratedCandidate, query_type: QueryType = "semantic"
-) -> GoldenItem:
+def candidate_to_golden_item(candidate: GeneratedCandidate) -> GoldenItem:
     """A fresh id per generated item — 'gen_' prefixed so it never collides
-    with the hand-written ids in GOLDEN_SET below.
-
-    `query_type` is set by the HUMAN during review, not by the generator: the
-    per-type F1 breakdown is the finding, so mislabelling it would corrupt the
-    result the whole exercise is for.
-    """
+    with the hand-written ids in GOLDEN_SET below."""
     return GoldenItem(
         id=f"gen_{uuid.uuid4().hex[:8]}",
         query=candidate.question,
         expected_answer=candidate.expected_answer,
         expected_snippets=candidate.expected_snippets,
-        query_type=query_type,
     )
 
 
-# Hand-written ground truth, scoped BY CORPUS. A dict rather than a flat list
-# because expected_snippets must exist verbatim in a specific corpus — a flat
-# list silently attaches coffee questions to a Python-PEP corpus and every
-# query becomes a meaningless F1. Generated items live in GoldenStore (SQLite,
-# also corpus-scoped) and are merged in at read time by cli._golden_set.
-GOLDEN_SET: dict[str, list[GoldenItem]] = {
-    "sample_data1": [
-        GoldenItem(
-            id="t1",  # temporal negation: after-cutoff
-            query=(
-                "I placed my order at 3 PM Pacific on a Wednesday. "
-                "Will it be roasted that same day?"
-            ),
-            expected_snippets=["roasted on the next roast day"],
-            expected_answer=(
-                "No. Orders placed after the 10:00 AM Pacific cutoff are roasted "
-                "on the next roast day, not the same day."
-            ),
-            query_type="negation",
+GOLDEN_SET: list[GoldenItem] = [
+    # GoldenItem(
+    #     id="q1",
+    #     query="Before what time if i placed an order then it will get roasted on the same day?",
+    #     expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+    #     expected_answer="If your order placed before 10:00 AM Pacific Time on a weekday, then they will roasted the same day and ship the following business day",
+    # ),
+    # --- Tricky additions (stress retrieval + generation) ---
+    # NOTE: ground truth is verbatim answer-bearing SOURCE snippets (see
+    # GoldenItem.expected_snippets), not chunk ids — so this one golden set is
+    # valid across every chunking config. The hit chunk id is resolved per config
+    # at eval time by golden.chunk_matches_snippets. Keep snippets short and
+    # distinctive (a phrase, not a whole sentence) so a chunk-boundary split is
+    # unlikely to break the match.
+    GoldenItem(
+        id="t1",  # temporal negation: after-cutoff is the complement of q1
+        query=(
+            "I placed my order at 3 PM Pacific on a Wednesday. "
+            "Will it be roasted that same day?"
         ),
-        GoldenItem(
-            id="t2",  # multi-hop: price (catalog) x 2 vs the $40 rule (shipping)
-            query=(
-                "If I buy two bags of Hambela, do I qualify for free standard shipping?"
-            ),
-            expected_snippets=[
-                "$21 per 12-ounce",
-                "Orders over $40 qualify for free standard shipping",
-            ],
-            expected_answer=(
-                "Yes. Hambela is $21 per bag, so two bags total $42, which is over "
-                "the $40 threshold that qualifies an order for free standard "
-                "shipping."
-            ),
-            query_type="multi_hop",
+        expected_snippets=["roasted on the next roast day"],
+        expected_answer=(
+            "No. Orders placed after the 10:00 AM Pacific cutoff are roasted on the "
+            "next roast day, not the same day."
         ),
-        GoldenItem(
-            id="t3",  # not-in-text geography: hallucination bait
-            query="Can I have my coffee delivered to Toronto, Canada?",
-            expected_snippets=[
-                "Aurora currently does not ship outside the United States"
-            ],
-            expected_answer=(
-                "No. Aurora ships within the United States only and does not "
-                "currently ship internationally."
-            ),
-            query_type="negation",
+    ),
+    GoldenItem(
+        id="t2",  # multi-hop + arithmetic: price (catalog) × 2 vs $40 rule (shipping)
+        query=(
+            "If I buy two bags of Hambela, do I qualify for free standard shipping?"
         ),
-    ],
-    # techdocs items are LLM-generated + reviewed; they live in GoldenStore.
-    "techdocs": [],
-}
+        expected_snippets=[
+            "$21 per 12-ounce",
+            "Orders over $40 qualify for free standard shipping",
+        ],
+        expected_answer=(
+            "Yes. Hambela is $21 per bag, so two bags total $42, which is over the "
+            "$40 threshold that qualifies an order for free standard shipping."
+        ),
+    ),
+    GoldenItem(
+        id="t3",  # negation / not-in-text geography: hallucination bait
+        query="Can I have my coffee delivered to Toronto, Canada?",
+        expected_snippets=["Aurora currently does not ship outside the United States"],
+        expected_answer=(
+            "No. Aurora ships within the United States only and does not currently "
+            "ship internationally."
+        ),
+    ),
+    # GoldenItem(
+    #     id="t4",  # refusal of an unknown: invites a made-up mg number (F3 bait)
+    #     query="How many milligrams of caffeine are in a cup of your dark roast?",
+    #     expected_snippets=["Aurora does not list exact caffeine content per cup"],
+    #     expected_answer=(
+    #         "Aurora does not list exact caffeine content per cup because it varies "
+    #         "by brew method and dose. As a general guide, a light and a dark roast "
+    #         "of the same coffee contain nearly the same caffeine by weight."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t5",  # counterintuitive: common belief (freezer = fresh) contradicts doc
+    #     query="To keep my beans fresh longer, should I store them in the freezer?",
+    #     expected_snippets=["store coffee in the refrigerator or freezer for daily use"],
+    #     expected_answer=(
+    #         "No. Aurora advises against refrigerating or freezing coffee for daily "
+    #         "use because condensation degrades the beans; store it in an airtight "
+    #         "container away from light, heat, and moisture."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t6",  # superlative: compare three prices, exclude blends
+    #     query="Which of Aurora's single-origin coffees is the most expensive?",
+    #     expected_snippets=["$21 per 12-ounce"],  # Hambela's price line (the max)
+    #     expected_answer=(
+    #         "Hambela from Ethiopia, at $21 per 12-ounce bag — more than Kiamabara "
+    #         "($19) and San Fernando ($17)."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t7",  # false premise: assumes opened bags are returnable
+    #     query=(
+    #         "I opened a bag and didn't like the flavor. "
+    #         "How do I return it for a refund?"
+    #     ),
+    #     expected_snippets=["does not accept returns of opened bags"],
+    #     expected_answer=(
+    #         "You can't return it. Aurora does not accept returns of opened bags "
+    #         "because coffee is perishable; refunds or replacements are only for bags "
+    #         "that arrive damaged or wrong, reported within 14 days of delivery."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="t8",  # framing trap: "just Fair Trade" vs the above-floor detail
+    #     query="Does Aurora just pay the standard Fair Trade price to its producers?",
+    #     expected_snippets=["well above the Fair Trade floor price"],
+    #     expected_answer=(
+    #         "No. Aurora pays a minimum of $3.50 per pound to producers, which is "
+    #         "well above the Fair Trade floor price."
+    #     ),
+    # ),
+    # GoldenItem(
+    #     id="q2",
+    #     query="what is the return policy for Aurora? ",
+    #     expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+    #     expected_answer="Because coffee is a perishable food product, Aurora does not accept returns of opened bags. If a bag arrives damaged or you received the wrong item, contact support within 14 days of delivery for a free replacement or full refund. Aurora does not require the damaged item to be shipped back.",
+    # ),
+    # GoldenItem(
+    #     id="q3",
+    #     query="Can i order from India ?",
+    #     expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+    #     expected_answer="As Aurora currently does not ship outside the United States. So you cannot order from India.",
+    # ),
+    #     GoldenItem(
+    #         id="q4",
+    #         query="What are different type of the coffee that",
+    #         expected_chunk_ids=["34026131b9ee066b_0000", "34026131b9ee066b_0001"],
+    #         expected_answer="""There are coffees are sold in 12-ounce bags of whole beans unless otherwise noted.
+    #
+    # Single-Origin Coffees
+    # Kiamabara — Kenya
+    # A bright, fruit-forward coffee from the Nyeri region of Kenya. Tasting notes of blackcurrant, grapefruit, and brown sugar. Roast level: light.
+    #
+    # Hambela — Ethiopia
+    # A floral, tea-like washed coffee from the Guji zone of Ethiopia. Tasting notes of jasmine, bergamot, and peach. Roast level: light.
+    #
+    # San Fernando — Colombia
+    # A balanced, sweet coffee from Huila, Colombia. Tasting notes of milk chocolate, red apple, and caramel. Roast level: medium.
+    #
+    # Blends
+    # Daybreak Blend
+    # Aurora's flagship espresso blend, combining Colombian and Brazilian beans. Tasting notes of dark chocolate, hazelnut, and dried cherry. Roast level: medium-dark.
+    #
+    # Decaf Nightfall
+    # A Swiss Water Process decaffeinated Colombian coffee. Tasting notes of caramel and almond. Roast level: medium. The Swiss Water Process 12-ounce bag.
+    #
+    # Decaf Nightfall
+    # A Swiss Water Process decaffeinated Colombian coffee. Tasting notes of caramel and almond. Roast level: medium. The Swiss Water Process uses no chemical solvents.
+    # """,
+    #     ),
+]
+
+
+# GoldenItem(
+#         query="What is the mission of the Aurora company",
+#         expected_chunk_ids=["847e853c85a6236e_0000"],
+#         expected_answer="""Aurora's mission is to make single-origin specialty coffee accessible without sacrificing traceability. Every bag of coffee Aurora sells lists the farm of origin, the harvest year, and the name of the importer.
+#
+# """
+#     ),
+#     GoldenItem(
+#         query="Who is the CEO of the company?",
+#         expected_chunk_ids=["847e853c85a6236e_0000"],
+#         expected_answer="Mara Velez is the CEO of the company"
+#     ),
+#     GoldenItem(
+#         query="for the 12-ounce cup how much grams of coffee and water i need to i need to add?",
+#         expected_chunk_ids=["8f05fd1d34154175_0000"],
+#         expected_answer="""For a 12-ounce cup, you need to add about 22 grams of coffee to 350 grams of water."""
+#     ),
+#     # --- Added items ---
+#     GoldenItem(
+#         query="How much does standard shipping cost and when is it free?",
+#         expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+#         expected_answer=(
+#             "Standard shipping is a flat $6 per order, and orders over $40 qualify "
+#             "for free standard shipping."
+#         ),
+#     ),
+#     GoldenItem(
+#         query="Can I cancel my coffee subscription, and is there a fee?",
+#         expected_chunk_ids=["3a81559eaa45a5b2_0000"],
+#         expected_answer=(
+#             "Yes. A subscription can be paused or cancelled at any time from the "
+#             "customer account page with no fee."
+#         ),
+#     ),
+#     GoldenItem(
+#         query="How much does the Kiamabara coffee cost?",
+#         expected_chunk_ids=["34026131b9ee066b_0000"],
+#         expected_answer="Kiamabara is $19 per 12-ounce bag.",
+#     ),
+#     GoldenItem(
+#         query="Is the decaf coffee processed with chemicals?",
+#         expected_chunk_ids=["34026131b9ee066b_0000", "34026131b9ee066b_0001"],
+#         expected_answer=(
+#             "No. Decaf Nightfall uses the Swiss Water Process, which uses no "
+#             "chemical solvents."
+#         ),
+#     ),
+#     GoldenItem(
+#         query="What brewing equipment does Aurora sell and for how much?",
+#         expected_chunk_ids=["34026131b9ee066b_0001"],
+#         expected_answer=(
+#             "Aurora sells a stainless steel pour-over dripper for $28 and a set of "
+#             "unbleached paper filters for $9."
+#         ),
+#     ),
+#     GoldenItem(
+#         query="When and where was Aurora founded, and by whom?",
+#         expected_chunk_ids=["847e853c85a6236e_0000"],
+#         expected_answer=(
+#             "Aurora Coffee Roasters was founded in 2014 in Portland, Oregon by "
+#             "Mara Velez and Tomas Idris."
+#         ),
+#     ),
+#     GoldenItem(
+#         query="Is Aurora a certified B Corporation?",
+#         expected_chunk_ids=["847e853c85a6236e_0000"],
+#         expected_answer="Yes, Aurora has been a certified B Corporation since 2021.",
+#     ),
+#     GoldenItem(
+#         query="What water temperature should I use for brewing?",
+#         expected_chunk_ids=["8f05fd1d34154175_0000"],
+#         expected_answer=(
+#             "Use water between 195 and 205 degrees Fahrenheit; boiling water at 212 "
+#             "degrees is too hot and can scorch the grounds."
+#         ),
+#     ),
