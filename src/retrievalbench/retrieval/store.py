@@ -31,6 +31,19 @@ class VectorStore(Protocol):
     async def upsert(self, chunks: list[Chunk], vectors: list[list[float]]) -> None: ...
 
 
+# Points per upsert request. One request for the whole corpus is ~150MB at
+# 24k chunks (1536 floats each) and Qdrant drops the connection mid-upload
+# (ReadError). Same failure shape as the embeddings 300k-token cap: fine on a
+# 14-chunk corpus, fatal on a real one.
+UPSERT_BATCH_SIZE = 256
+
+
+def _point_batches(
+    points: list[models.PointStruct], size: int = UPSERT_BATCH_SIZE
+) -> list[list[models.PointStruct]]:
+    return [points[i : i + size] for i in range(0, len(points), size)]
+
+
 class QdrantStore:
     """
     Qdrant Vector DB
@@ -75,7 +88,8 @@ class QdrantStore:
             for chunk, vector in zip(chunks, vectors, strict=True)
         ]
 
-        await self.client.upsert(collection_name=self.collection, points=points)
+        for batch in _point_batches(points):
+            await self.client.upsert(collection_name=self.collection, points=batch)
 
 
 class QdrantHybridStore:
@@ -137,4 +151,5 @@ class QdrantHybridStore:
             )
         ]
 
-        await self.client.upsert(collection_name=self.collection, points=points)
+        for batch in _point_batches(points):
+            await self.client.upsert(collection_name=self.collection, points=batch)
