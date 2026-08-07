@@ -106,3 +106,28 @@ def test_every_priced_model_has_input_and_output_rates() -> None:
     for model, price in _PRICE_PER_1M.items():
         assert len(price) == 2, model
         assert all(rate > 0 for rate in price), model
+
+
+def test_embed_batches_stay_under_the_request_cap() -> None:
+    """OpenAI caps one embeddings call at 300k tokens. A 24k-chunk corpus is
+    ~5.1M, so sending everything in one request 400x's the limit — it worked
+    only while the corpus was 14 chunks."""
+    from retrievalbench.retrieval.embedders import EMBED_BATCH_SIZE, _batches
+
+    batches = _batches([f"t{i}" for i in range(24000)], EMBED_BATCH_SIZE)
+    assert sum(len(b) for b in batches) == 24000
+    assert all(len(b) <= EMBED_BATCH_SIZE for b in batches)
+    assert _batches([], EMBED_BATCH_SIZE) == []
+    assert _batches(["a"], EMBED_BATCH_SIZE) == [["a"]]
+
+
+def test_upsert_batches_keep_the_payload_shippable() -> None:
+    """24k points x 1536 floats in one request is ~150MB; Qdrant drops it.
+    Same failure shape as the embeddings cap — invisible on a tiny corpus."""
+    from retrievalbench.retrieval.store import UPSERT_BATCH_SIZE, _point_batches
+
+    fake = list(range(24000))  # only length matters here
+    batches = _point_batches(fake, UPSERT_BATCH_SIZE)  # type: ignore[arg-type]
+    assert sum(len(b) for b in batches) == 24000
+    assert all(len(b) <= UPSERT_BATCH_SIZE for b in batches)
+    assert _point_batches([], UPSERT_BATCH_SIZE) == []

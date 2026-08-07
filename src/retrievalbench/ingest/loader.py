@@ -23,7 +23,7 @@ def extract_file(file_path: Path) -> str:
 def load_corpus(corpus_dir: str) -> list[Document]:
     documents = []
     for file_path in Path(corpus_dir).glob("*"):
-        if file_path.suffix not in [".pdf", ".md", ".txt"]:
+        if file_path.suffix not in [".pdf", ".md", ".txt", ".rst"]:
             continue
 
         doc_id = make_document_id(file_path)

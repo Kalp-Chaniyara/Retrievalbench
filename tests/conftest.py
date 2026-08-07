@@ -33,17 +33,17 @@ from retrievalbench.model import (
 )
 
 BASE_TIME = datetime(2026, 8, 4, 12, 0, 0)
-CORPUS_DIR = Path(__file__).resolve().parents[1] / "data" / "corpora" / "sample_data1"
+CORPORA_ROOT = Path(__file__).resolve().parents[1] / "data" / "corpora"
 
 
 @pytest.fixture
-def corpus_dir() -> Path:
-    """The REAL corpus the pipeline runs against — committed, not a copy.
+def corpora_root() -> Path:
+    """Root of the REAL committed corpora — not a fixture copy.
 
-    Using the real thing (rather than a fixture duplicate) is deliberate: the
-    golden set's expected_snippets must exist verbatim in THESE files, so a
-    copy could drift and let a broken snippet pass CI while real runs fail."""
-    return CORPUS_DIR
+    Using the real thing is deliberate: expected_snippets must exist verbatim
+    in THOSE files, so a duplicate could drift and let a broken snippet pass
+    CI while real runs fail."""
+    return CORPORA_ROOT
 
 
 def make_config(
